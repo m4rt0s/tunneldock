@@ -13,6 +13,13 @@ services:
     read_only: true
     tmpfs:
       - /run
+      - /tmp
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "2375"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   tunneldock:
     # Prebuilt image published by .github/workflows/docker-build.yml.
@@ -30,3 +37,11 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    healthcheck:
+      # tunneldock has no server of its own; this checks it can still reach
+      # the socket-proxy it depends on, which is its main failure mode.
+      test: ["CMD", "nc", "-z", "docker-socket-proxy", "2375"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
