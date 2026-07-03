@@ -11,7 +11,11 @@ export class CloudflareService {
   constructor() {
     this.cloudflare = new Cloudflare({
       apiEmail: process.env.CF_API_EMAIL || "",
-      apiToken: process.env.CF_API_TOKEN || "",
+      // CF_API_TOKEN is actually the Global API Key (see README "Security
+      // note"). The Cloudflare SDK requires it as `apiKey`, not `apiToken` --
+      // `apiToken` is for real Bearer-token auth and rejects this value with
+      // "Invalid access token" (error 9109).
+      apiKey: process.env.CF_API_TOKEN || "",
     });
     this.accountId = process.env.CF_ACCOUNT_ID || "";
     this.zoneId = process.env.CF_ZONE_ID || "";
