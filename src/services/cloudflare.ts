@@ -12,6 +12,9 @@ export class CloudflareService {
   private accountId: string;
   private zoneId: string;
   private domain: string;
+  private accountName: string = "";
+  private tunnelName: string = "";
+  private authMode: "token" | "legacy-key";
 
   constructor() {
     // Two auth modes, in priority order:
@@ -23,6 +26,7 @@ export class CloudflareService {
     //      README "Security note" for why this is best avoided.
     if (process.env.CF_API_TOKEN) {
       logger.info("Using scoped Cloudflare API Token for authentication");
+      this.authMode = "token";
       this.cloudflare = new Cloudflare({
         apiToken: process.env.CF_API_TOKEN,
       });
@@ -31,6 +35,7 @@ export class CloudflareService {
         "Using legacy Global API Key -- this grants full Cloudflare account " +
           "access, not just this zone/tunnel. Prefer CF_API_TOKEN if possible."
       );
+      this.authMode = "legacy-key";
       this.cloudflare = new Cloudflare({
         apiEmail: process.env.CF_API_EMAIL,
         apiKey: process.env.CF_API_KEY,
@@ -58,6 +63,7 @@ export class CloudflareService {
       if (!account) {
         throw new Error("Invalid Cloudflare account credentials");
       }
+      this.accountName = account.name;
       logger.debug("Account credentials validated successfully");
 
       // Get zone details
@@ -83,6 +89,7 @@ export class CloudflareService {
       if (!tunnel) {
         throw new Error("Invalid tunnel ID");
       }
+      this.tunnelName = tunnel.name || "";
       logger.debug("Tunnel verified successfully");
 
       logger.info(
@@ -101,6 +108,20 @@ export class CloudflareService {
 
   getDomain(): string {
     return this.domain;
+  }
+
+  getStatus() {
+    return {
+      accountName: this.accountName,
+      zoneName: this.domain,
+      tunnelName: this.tunnelName,
+      tunnelId: this.tunnelId(),
+      authMode: this.authMode,
+    };
+  }
+
+  private tunnelId(): string {
+    return process.env.CF_TUNNEL_ID || "";
   }
 
   async manageDNSRecord(hostname: string, tunnelId: string): Promise<string> {

@@ -10,6 +10,7 @@ TunnelDock automatically manages Cloudflare Tunnel configurations for Docker con
 - DNS record management via Cloudflare API
 - Event-driven container monitoring, not polling (see below) -- with a long-interval fallback pass (`TUNNELDOCK_WATCH_INTERVAL`) in case the event stream ever drops something
 - Grace period before deleting a route (`TUNNELDOCK_DELETE_GRACE_PERIOD_MS`, default 5min) -- stopping a container to redeploy or edit its config doesn't immediately tear down its DNS/ingress; it's only removed once it's stayed down longer than the grace period
+- Read-only web dashboard (see [Dashboard](#dashboard)) -- managed routes, seen containers, recent logs
 - Configurable via Docker labels
 
 ### Why events, not polling
@@ -73,18 +74,29 @@ Regardless of which auth mode you use, `docker-compose.yml` also isolates Docker
 - **No direct Docker socket access.** `tunneldock` only ever calls `GET /containers/json` and `GET /events` (see `src/services/docker.ts`). Instead of mounting `/var/run/docker.sock` into it, a [`tecnativa/docker-socket-proxy`](https://github.com/Tecnativa/docker-socket-proxy) sits in front with only `CONTAINERS=1` and `EVENTS=1` enabled — everything else (exec, create, start/stop, volumes...) is blocked by default. `tunneldock` talks to it over `DOCKER_HOST=tcp://docker-socket-proxy:2375`, dockerode picks that up automatically.
 - **If you must use the legacy Global API Key**, consider a dedicated Cloudflare account for whatever this manages, so a compromised key doesn't reach unrelated infrastructure.
 
+## Dashboard
+
+A read-only web UI is served on `WEB_UI_PORT` (default `9091`, published in `docker-compose.yml`) -- open `http://<host>:9091`. Shows:
+- Account/zone/tunnel identity and which auth mode is active
+- Every currently managed route (hostname, service, DNS/config status, last sync), including routes in their delete grace period with a countdown
+- Every container tunneldock has seen, whether it's managed, and its target hostname
+- The last 500 log lines, color-coded by level
+
+It's LAN-only by design (no auth) -- don't expose it through the tunnel it manages.
+
 ## Environment Variables
 
 Required:
-- `CF_API_TOKEN`: Your Cloudflare API token
-- `CF_API_EMAIL`: Your Cloudflare account email
 - `CF_ACCOUNT_ID`: Your Cloudflare account ID
 - `CF_ZONE_ID`: Your Cloudflare zone ID
 - `CF_TUNNEL_ID`: Your Cloudflare Tunnel ID
+- Either `CF_API_TOKEN` (preferred, scoped) or both `CF_API_KEY` and `CF_API_EMAIL` (legacy) -- see [Security note](#security-note)
 
 Optional:
-- `TUNNELDOCK_WATCH_INTERVAL`: Container watch interval in milliseconds (default: 1000)
-- `LOG_LEVEL`: Log level (default: 'info')
+- `TUNNELDOCK_WATCH_INTERVAL`: fallback reconciliation interval in ms, only matters if the Docker event stream misses something (default: 60000)
+- `TUNNELDOCK_DELETE_GRACE_PERIOD_MS`: how long a hostname stays inactive before its route is deleted (default: 300000, i.e. 5 minutes; `0` deletes immediately)
+- `WEB_UI_PORT`: dashboard port (default: 9091)
+- `LOG_LEVEL`: log level (default: 'info')
 
 ## Configuration
 

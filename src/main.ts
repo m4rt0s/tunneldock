@@ -3,6 +3,7 @@ import { CloudflareService } from "./services/cloudflare";
 import { DataService } from "./services/data";
 import { CustomContainerInfo } from "./types";
 import { logger } from "./utils/logger";
+import { startDashboard } from "./server";
 
 class TunnelDock {
   private dockerService!: DockerService;
@@ -11,6 +12,7 @@ class TunnelDock {
   private tunnelId: string;
   private watchInterval: number;
   private deleteGracePeriodMs: number;
+  private startedAt: string = new Date().toISOString();
 
   constructor() {
     this.validateEnvironment();
@@ -285,6 +287,15 @@ class TunnelDock {
       this.dockerService = new DockerService(
         this.cloudflareService.getDomain()
       );
+
+      const dashboardPort = parseInt(process.env.WEB_UI_PORT || "9091");
+      startDashboard(dashboardPort, {
+        dataService: this.dataService,
+        cloudflareService: this.cloudflareService,
+        startedAt: this.startedAt,
+        deleteGracePeriodMs: this.deleteGracePeriodMs,
+      });
+
       logger.info("TunnelDock initialization complete");
     } catch (error) {
       logger.error({ err: error }, "Failed to initialize TunnelDock");

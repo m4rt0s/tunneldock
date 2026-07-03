@@ -13,4 +13,6 @@ COPY tsconfig.json ./
 
 RUN mkdir -p /app/data
 
+EXPOSE 9091
+
 CMD ["bun", "run", "src/main.ts"]

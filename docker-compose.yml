@@ -34,6 +34,11 @@ services:
       # dockerode reads DOCKER_HOST automatically -- no socket mount needed,
       # so tunneldock never touches the real /var/run/docker.sock.
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
+      - WEB_UI_PORT=9091
+    ports:
+      # Dashboard: managed routes, seen containers, recent logs. LAN-only --
+      # not meant to go through the tunnel it manages.
+      - "9091:9091"
     volumes:
       - ./data:/app/data
     env_file:
