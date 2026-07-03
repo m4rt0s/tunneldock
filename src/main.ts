@@ -10,6 +10,7 @@ class TunnelDock {
   private dataService: DataService;
   private tunnelId: string;
   private watchInterval: number;
+  private deleteGracePeriodMs: number;
 
   constructor() {
     this.validateEnvironment();
@@ -18,6 +19,12 @@ class TunnelDock {
     this.tunnelId = process.env.CF_TUNNEL_ID || "";
     this.watchInterval = parseInt(
       process.env.TUNNELDOCK_WATCH_INTERVAL || "1000"
+    );
+    // How long a hostname must stay inactive before its route is actually
+    // deleted -- avoids DNS/ingress churn for a container that's briefly
+    // down for a manual restart or a config change. Default 5 minutes.
+    this.deleteGracePeriodMs = parseInt(
+      process.env.TUNNELDOCK_DELETE_GRACE_PERIOD_MS || "300000"
     );
   }
 
@@ -119,15 +126,46 @@ class TunnelDock {
       }
     }
 
-    // Find and remove stale tunnels and domains
+    const now = Date.now();
     const staleHostnames = Object.keys(currentData.tunnels).filter(
       (hostname) => !activeHostnames.has(hostname)
     );
 
+    let dataChanged = false;
+
+    // A hostname that's active again cancels any pending deletion.
+    for (const hostname of Object.keys(currentData.tunnels)) {
+      if (activeHostnames.has(hostname) && currentData.tunnels[hostname].staleSince) {
+        logger.info({ hostname }, "Hostname active again, cancelling pending cleanup");
+        delete currentData.tunnels[hostname].staleSince;
+        dataChanged = true;
+      }
+    }
+
+    const hostnamesToDelete: string[] = [];
     for (const hostname of staleHostnames) {
+      const staleSince = currentData.tunnels[hostname].staleSince;
+      if (!staleSince) {
+        // First time we've noticed this one is inactive: start the grace
+        // period instead of deleting immediately.
+        currentData.tunnels[hostname].staleSince = new Date(now).toISOString();
+        dataChanged = true;
+        logger.info(
+          { hostname, gracePeriodMs: this.deleteGracePeriodMs },
+          "Hostname inactive, starting grace period before cleanup"
+        );
+        continue;
+      }
+
+      if (now - new Date(staleSince).getTime() >= this.deleteGracePeriodMs) {
+        hostnamesToDelete.push(hostname);
+      }
+    }
+
+    for (const hostname of hostnamesToDelete) {
       logger.info(
         { hostname },
-        "Cleaning up stale tunnel configuration and records"
+        "Grace period elapsed, cleaning up stale tunnel configuration and records"
       );
 
       try {
@@ -141,6 +179,7 @@ class TunnelDock {
         if (currentData.domains[hostname]) {
           delete currentData.domains[hostname];
         }
+        dataChanged = true;
 
         logger.info(
           { hostname },
@@ -154,12 +193,14 @@ class TunnelDock {
       }
     }
 
-    if (staleHostnames.length > 0) {
+    if (dataChanged) {
       this.dataService.saveData({
         ...currentData,
         timestamp: new Date().toISOString(),
       });
-      logger.info({ staleHostnames }, "Cleaned up stale records");
+      if (hostnamesToDelete.length > 0) {
+        logger.info({ hostnamesToDelete }, "Cleaned up stale records");
+      }
     }
   }
 

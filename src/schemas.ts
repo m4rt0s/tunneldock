@@ -74,6 +74,10 @@ const tunnelRecordSchema = baseTunnelRecordSchema.extend({
   tunnelId: z.string(),
   dnsStatus: z.string().optional(),
   configStatus: z.string(),
+  // ISO timestamp of when this hostname was first observed as inactive.
+  // Cleared once active again; only deleted once older than the configured
+  // grace period. Absent/undefined means "currently active, not stale".
+  staleSince: z.string().optional(),
 });
 
 // Docker label configuration schemas

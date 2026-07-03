@@ -9,6 +9,7 @@ TunnelDock automatically manages Cloudflare Tunnel configurations for Docker con
 - Automatic Cloudflare Tunnel configuration for Docker containers
 - DNS record management via Cloudflare API
 - Event-driven container monitoring, not polling (see below) -- with a long-interval fallback pass (`TUNNELDOCK_WATCH_INTERVAL`) in case the event stream ever drops something
+- Grace period before deleting a route (`TUNNELDOCK_DELETE_GRACE_PERIOD_MS`, default 5min) -- stopping a container to redeploy or edit its config doesn't immediately tear down its DNS/ingress; it's only removed once it's stayed down longer than the grace period
 - Configurable via Docker labels
 
 ### Why events, not polling
