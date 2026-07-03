@@ -292,6 +292,7 @@ class TunnelDock {
       startDashboard(dashboardPort, {
         dataService: this.dataService,
         cloudflareService: this.cloudflareService,
+        tunnelId: this.tunnelId,
         startedAt: this.startedAt,
         deleteGracePeriodMs: this.deleteGracePeriodMs,
       });

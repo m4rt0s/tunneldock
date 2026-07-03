@@ -124,6 +124,55 @@ export class CloudflareService {
     return process.env.CF_TUNNEL_ID || "";
   }
 
+  // All ingress rules currently on the tunnel, straight from Cloudflare --
+  // includes routes tunneldock never created (manually configured ones),
+  // which is the point: this is used to show what's *actually* live, not
+  // just what's in our own local tracking file.
+  async getIngressRules(): Promise<Array<{ hostname: string; service: string }>> {
+    const currentConfig = await this.cloudflare.zeroTrust.tunnels.configurations.get(
+      this.tunnelId(),
+      { account_id: this.accountId }
+    );
+    const rules = currentConfig.config?.ingress || [];
+    return rules
+      .filter((rule) => rule.hostname)
+      .map((rule) => ({ hostname: rule.hostname!, service: rule.service }));
+  }
+
+  // Maps hostname -> Access application name + policy names, for every
+  // Access Application whose domain matches one of our routes. A route with
+  // no entry here has no Access protection at all.
+  async getAccessProtection(): Promise<Record<string, { appName: string; policies: string[] }>> {
+    const result: Record<string, { appName: string; policies: string[] }> = {};
+
+    const apps = await this.cloudflare.zeroTrust.access.applications.list({
+      account_id: this.accountId,
+    });
+
+    for (const app of apps.result ?? []) {
+      const domain = (app as { domain?: string }).domain;
+      const appId = (app as { id?: string }).id;
+      const appName = (app as { name?: string }).name || "Access";
+      if (!domain || !appId) continue;
+
+      // domain can include a path (e.g. "host.example.com/admin"); we only
+      // route by hostname, so match on that part.
+      const hostname = domain.split("/")[0];
+
+      const policies = await this.cloudflare.zeroTrust.access.applications.policies.list(
+        appId,
+        { account_id: this.accountId }
+      );
+      const policyNames = (policies.result ?? [])
+        .map((p) => (p as { name?: string }).name)
+        .filter((name): name is string => !!name);
+
+      result[hostname] = { appName, policies: policyNames };
+    }
+
+    return result;
+  }
+
   async manageDNSRecord(hostname: string, tunnelId: string): Promise<string> {
     try {
       logger.info({ hostname }, `Managing DNS record`);
