@@ -1,9 +1,31 @@
 services:
-  tunneldock:
-    build: .
-    container_name: tunneldock
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: tunneldock-socket-proxy
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # Everything else defaults to 0 (blocked). tunneldock only ever calls
+      # GET /containers/json, so this is the entire surface it needs.
+      - CONTAINERS=1
+      - POST=0
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /run
+
+  tunneldock:
+    # Prebuilt image published by .github/workflows/docker-build.yml.
+    # Swap for `build: .` if you'd rather build locally.
+    image: ghcr.io/m4rt0s/tunneldock:latest
+    container_name: tunneldock
+    depends_on:
+      - docker-socket-proxy
+    environment:
+      # dockerode reads DOCKER_HOST automatically -- no socket mount needed,
+      # so tunneldock never touches the real /var/run/docker.sock.
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+    volumes:
       - ./data:/app/data
     env_file:
       - .env

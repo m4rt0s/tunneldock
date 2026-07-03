@@ -1,5 +1,7 @@
 # TunnelDock
 
+> Fork of [radityaharya/tunneldock](https://github.com/radityaharya/tunneldock), vendored here because upstream has minimal commit history and no releases. See [Security note](#security-note) before deploying.
+
 TunnelDock automatically manages Cloudflare Tunnel configurations for Docker containers. It monitors container state changes and configures Cloudflare Tunnels and DNS records accordingly.
 
 ## Features
@@ -43,7 +45,18 @@ TunnelDock automatically manages Cloudflare Tunnel configurations for Docker con
    docker compose up -d
    ```
 
-That's it! TunnelDock will now monitor your Docker containers and manage Cloudflare Tunnel configurations automatically.
+That's it! TunnelDock will now monitor your Docker containers and manage Cloudflare Tunnel configurations automatically. The bundled `docker-compose.yml` pulls the prebuilt image from `ghcr.io/m4rt0s/tunneldock:latest` (published by the GitHub Actions workflow on every push to `main`) and never mounts the real Docker socket into the tunneldock container — see below.
+
+## Security note
+
+`CF_API_TOKEN` here is **not** a scoped Cloudflare API Token. The Cloudflare service in this codebase only implements the legacy `X-Auth-Email` + `X-Auth-Key` (Global API Key) auth scheme — there is no way to run this with a permission-limited token. The Global API Key grants full access to the entire Cloudflare account (every zone, every tunnel, billing), not just the zone/tunnel you're configuring.
+
+Combined with upstream's minimal review history, that's a real risk if this container is ever compromised. Two mitigations are baked into `docker-compose.yml`:
+
+- **No direct Docker socket access.** `tunneldock` only ever calls `GET /containers/json` (see `src/services/docker.ts`). Instead of mounting `/var/run/docker.sock` into it, a [`tecnativa/docker-socket-proxy`](https://github.com/Tecnativa/docker-socket-proxy) sits in front with only `CONTAINERS=1` enabled — everything else (exec, create, start/stop, volumes...) is blocked by default. `tunneldock` talks to it over `DOCKER_HOST=tcp://docker-socket-proxy:2375`, dockerode picks that up automatically.
+- **Isolate the Cloudflare account if you can.** If this account has other zones/tunnels you care about, consider a dedicated Cloudflare account for whatever this manages, so a compromised Global Key doesn't reach unrelated infrastructure.
+
+If you want scoped-token auth instead, look at [DockFlare](https://github.com/ChrispyBacon-dev/DockFlare) — heavier (needs Redis) but actively maintained and uses real API Tokens.
 
 ## Environment Variables
 
