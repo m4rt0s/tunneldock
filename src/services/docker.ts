@@ -53,14 +53,25 @@ export class DockerService {
     const stream = await this.docker.getEvents({
       filters: { type: ["container"], event: ["start", "die", "stop", "destroy"] },
     });
+    // Docker's event stream is newline-delimited JSON, but TCP chunk
+    // boundaries don't align with event boundaries -- a single "data" event
+    // can contain a partial JSON object, several complete ones, or both.
+    // Buffer until we have full lines and only parse those.
+    let buffer = "";
     stream.on("data", (chunk: Buffer) => {
-      try {
-        const event = JSON.parse(chunk.toString());
-        if (event.Actor?.ID) {
-          onEvent(event.Actor.ID, event.Action);
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || ""; // last entry may be an incomplete line
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          if (event.Actor?.ID) {
+            onEvent(event.Actor.ID, event.Action);
+          }
+        } catch (err) {
+          logger.error({ err, line }, "Failed to parse Docker event");
         }
-      } catch (err) {
-        logger.error({ err }, "Failed to parse Docker event");
       }
     });
     stream.on("error", (err: Error) => {
