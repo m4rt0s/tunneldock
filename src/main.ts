@@ -200,17 +200,29 @@ class TunnelDock {
     // added before tunneldock started are picked up without a restart.
     let containers = await this.runReconciliationPass([]);
 
-    let passPending = false;
+    // A pass can take several seconds (each Cloudflare call is a network
+    // round trip). If an event arrives while one is already running, it must
+    // still cause a follow-up pass once the current one finishes -- dropping
+    // it would miss whatever changed in between (reproduced live: a "start"
+    // event arriving mid-cleanup from a prior "stop" was silently lost).
+    let isRunning = false;
+    let rerunRequested = false;
     const triggerPass = async () => {
-      if (passPending) return; // coalesce bursts (e.g. `compose up` restarting several containers at once)
-      passPending = true;
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      rerunRequested = true;
+      if (isRunning) return;
+      isRunning = true;
       try {
-        containers = await this.runReconciliationPass(containers);
-      } catch (error) {
-        logger.error({ err: error }, "Error in event-triggered reconciliation pass");
+        while (rerunRequested) {
+          rerunRequested = false;
+          await new Promise((resolve) => setTimeout(resolve, 250)); // debounce window to coalesce bursts
+          try {
+            containers = await this.runReconciliationPass(containers);
+          } catch (error) {
+            logger.error({ err: error }, "Error in event-triggered reconciliation pass");
+          }
+        }
       } finally {
-        passPending = false;
+        isRunning = false;
       }
     };
 
