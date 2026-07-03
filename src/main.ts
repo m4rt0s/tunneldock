@@ -104,6 +104,38 @@ class TunnelDock {
           dnsStatus: dnsStatus,
         });
 
+        // Access is opt-in via tunneldock.access and only ever touches an
+        // Application tunneldock itself created (tracked accessAppId) --
+        // never one configured manually for the same hostname.
+        const existingAccessAppId = this.dataService.loadData().tunnels[config.hostname]?.accessAppId;
+        if (config.access) {
+          const appId = await this.cloudflareService.ensureAccessApplication(
+            config.hostname,
+            config.access,
+            existingAccessAppId
+          );
+          if (appId) {
+            this.dataService.updateTunnelData(config.hostname, {
+              hostname: config.hostname,
+              tunnelId: this.tunnelId,
+              service: config.service,
+              configStatus: "updated",
+              dnsStatus: dnsStatus,
+              accessAppId: appId,
+            });
+          }
+        } else if (existingAccessAppId) {
+          await this.cloudflareService.removeAccessApplication(existingAccessAppId);
+          this.dataService.updateTunnelData(config.hostname, {
+            hostname: config.hostname,
+            tunnelId: this.tunnelId,
+            service: config.service,
+            configStatus: "updated",
+            dnsStatus: dnsStatus,
+            accessAppId: undefined,
+          });
+        }
+
         logger.info({ hostname: config.hostname }, `Configuration completed`);
       } catch (error) {
         logger.error(
@@ -173,7 +205,8 @@ class TunnelDock {
       try {
         await this.cloudflareService.deleteTunnelConfig(
           hostname,
-          this.tunnelId
+          this.tunnelId,
+          currentData.tunnels[hostname].accessAppId
         );
 
         // Remove local records

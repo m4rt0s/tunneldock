@@ -97,6 +97,9 @@ export class DockerService {
         case 'assign':
           config.assign = value.toLowerCase() === 'true';
           break;
+        case 'access':
+          config.access = value;
+          break;
         case 'service':
           if (!config.service) config.service = { protocol: 'http' };
           if (path.length < 3) continue;
@@ -169,6 +172,7 @@ export class DockerService {
         hostname,
         port,
         service,
+        access: config.access,
         originRequest: config.originRequest
       });
 

@@ -178,6 +178,72 @@ export class CloudflareService {
     return result;
   }
 
+  // Looks up an existing *reusable* Access policy by name (the account-level
+  // kind shared across applications, like "Yo y familia" or "service token
+  // only" -- not a one-off policy scoped to a single app). tunneldock only
+  // ever attaches to policies that already exist; it never creates them,
+  // since policy rules (who/what they allow) are a security decision that
+  // shouldn't be inferred from a label value.
+  private async findReusablePolicyId(policyName: string): Promise<string | null> {
+    const policies = await this.cloudflare.zeroTrust.access.policies.list({
+      account_id: this.accountId,
+    });
+    const match = (policies.result ?? []).find(
+      (p) => (p as { name?: string }).name?.toLowerCase() === policyName.toLowerCase()
+    );
+    return (match as { id?: string } | undefined)?.id ?? null;
+  }
+
+  // Creates or updates the Access Application for `hostname` so it's
+  // protected by the named reusable policy. Returns the Application ID to
+  // persist locally (so a later label removal knows it's safe to delete
+  // *this* app), or null if the named policy doesn't exist -- in which case
+  // nothing is touched.
+  async ensureAccessApplication(
+    hostname: string,
+    policyName: string,
+    existingAppId?: string
+  ): Promise<string | null> {
+    const policyId = await this.findReusablePolicyId(policyName);
+    if (!policyId) {
+      logger.error(
+        { hostname, policyName },
+        "No reusable Access policy with this name exists -- skipping Access setup"
+      );
+      return null;
+    }
+
+    const appParams = {
+      account_id: this.accountId,
+      domain: hostname,
+      type: "self_hosted",
+      name: hostname,
+      policies: [policyId],
+    };
+
+    if (existingAppId) {
+      await this.cloudflare.zeroTrust.access.applications.update(existingAppId, appParams as any);
+      logger.info({ hostname, policyName, appId: existingAppId }, "Updated Access application");
+      return existingAppId;
+    }
+
+    const created = await this.cloudflare.zeroTrust.access.applications.create(appParams as any);
+    const appId = (created as { id?: string }).id ?? null;
+    logger.info({ hostname, policyName, appId }, "Created Access application");
+    return appId;
+  }
+
+  // Deletes an Access Application tunneldock itself created (identified by
+  // the ID tracked locally) -- never looked up by hostname here, precisely
+  // so this can't accidentally reach an Access app someone else configured
+  // manually for the same domain.
+  async removeAccessApplication(appId: string): Promise<void> {
+    await this.cloudflare.zeroTrust.access.applications.delete(appId, {
+      account_id: this.accountId,
+    });
+    logger.info({ appId }, "Removed Access application");
+  }
+
   async manageDNSRecord(hostname: string, tunnelId: string): Promise<string> {
     try {
       logger.info({ hostname }, `Managing DNS record`);
@@ -314,9 +380,17 @@ export class CloudflareService {
     }
   }
 
-  async deleteTunnelConfig(hostname: string, tunnelId: string): Promise<void> {
+  async deleteTunnelConfig(
+    hostname: string,
+    tunnelId: string,
+    accessAppId?: string
+  ): Promise<void> {
     try {
       logger.info({ hostname, tunnelId }, "Deleting tunnel configuration");
+
+      if (accessAppId) {
+        await this.removeAccessApplication(accessAppId);
+      }
 
       // First, find and remove the DNS record
       const records = await this.cloudflare.dns.records.list({
@@ -326,7 +400,6 @@ export class CloudflareService {
         },
         type: "CNAME",
       });
-      console.log(records);
       if (records.result && records.result.length > 0) {
         const record = records.result[0];
         await this.cloudflare.dns.records.delete(record.id, {

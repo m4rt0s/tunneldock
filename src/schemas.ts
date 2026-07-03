@@ -59,6 +59,7 @@ export const tunnelUpdateSchema = baseTunnelSchema.extend({
   configStatus: z.string(),
   dnsStatus: z.string().optional(),
   originRequest: tunnelOriginRequestSchema.optional(),
+  accessAppId: z.string().optional(),
 });
 
 // Domain record schema
@@ -78,6 +79,11 @@ const tunnelRecordSchema = baseTunnelRecordSchema.extend({
   // Cleared once active again; only deleted once older than the configured
   // grace period. Absent/undefined means "currently active, not stale".
   staleSince: z.string().optional(),
+  // ID of the Access Application tunneldock itself created for this
+  // hostname (via tunneldock.access), if any. Only ever set/cleared by
+  // tunneldock -- Access apps we didn't create are never touched, so this
+  // being unset doesn't mean "unprotected", just "not ours to manage".
+  accessAppId: z.string().optional(),
 });
 
 // Docker label configuration schemas
@@ -90,6 +96,7 @@ export const dockerServiceSchema = z.object({
 export const dockerLabelConfigSchema = z.object({
   hostname: z.string().optional(),
   assign: z.boolean().optional(),
+  access: z.string().optional(),
   service: dockerServiceSchema.optional(),
   originRequest: tunnelOriginRequestSchema.optional()
 });
@@ -99,6 +106,7 @@ export const dockerTunnelConfigSchema = z.object({
   hostname: z.string(),
   port: z.number(),
   service: z.string(),
+  access: z.string().optional(),
   originRequest: tunnelOriginRequestSchema.optional()
 });
 

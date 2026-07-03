@@ -123,9 +123,13 @@ export function startDashboard(port: number, deps: ServerDeps): void {
             return Response.json({ error: "hostname required" }, { status: 400 });
           }
 
-          await deps.cloudflareService.deleteTunnelConfig(hostname, deps.tunnelId);
-
           const data = deps.dataService.loadData();
+          await deps.cloudflareService.deleteTunnelConfig(
+            hostname,
+            deps.tunnelId,
+            data.tunnels[hostname]?.accessAppId
+          );
+
           if (data.tunnels[hostname]) {
             delete data.tunnels[hostname];
             if (data.domains[hostname]) delete data.domains[hostname];
@@ -365,7 +369,7 @@ async function refreshState(live, fresh) {
   const tunnelEntries = Object.entries(data.tunnels || {});
   const tunnelsHtml = tunnelEntries.length === 0
     ? '<div class="empty">Ninguna ruta gestionada todavía</div>'
-    : \`<table><thead><tr><th>Hostname</th><th>Servicio</th><th>Access</th><th>Última sync</th><th>Estado</th><th></th></tr></thead><tbody>
+    : \`<table><thead><tr><th>Hostname</th><th>Servicio</th><th>Access</th><th>Estado</th><th></th></tr></thead><tbody>
         \${tunnelEntries.map(([hostname, t]) => {
           let stateBadge = '<span class="badge ok">activa</span>';
           if (t.staleSince) {
@@ -378,7 +382,6 @@ async function refreshState(live, fresh) {
             <td>\${hostnameLink(hostname)}</td>
             <td><code>\${esc(t.service)}</code></td>
             <td>\${accessBadge(hostname, data.accessProtection || {})}</td>
-            <td>hace \${timeAgo(t.lastSync)}</td>
             <td>\${stateBadge}</td>
             <td><button class="btn-delete" onclick="deleteRoute('\${esc(hostname)}', this)">Borrar</button></td>
           </tr>\`;
