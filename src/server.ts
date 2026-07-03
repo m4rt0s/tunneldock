@@ -63,35 +63,38 @@ export function startDashboard(port: number, deps: ServerDeps): void {
 
       if (url.pathname === "/api/state") {
         const data = deps.dataService.loadData();
-        const managedHostnames = new Set(Object.keys(data.tunnels));
 
-        if (url.searchParams.has("fresh")) {
-          cloudflareCache = null;
-        }
-
-        let ingressRules: Array<{ hostname: string; service: string }> = [];
-        let accessProtection: Record<string, { appName: string; policies: string[] }> = {};
-        try {
-          const cf = await getCloudflareState(deps.cloudflareService);
-          ingressRules = cf.ingressRules;
-          accessProtection = cf.accessProtection;
-        } catch (err) {
-          logger.error({ err }, "Failed to fetch live Cloudflare tunnel state");
-        }
-
-        const unmanagedRoutes = ingressRules.filter(
-          (rule) => !managedHostnames.has(rule.hostname)
-        );
-
-        return Response.json({
+        const response: Record<string, unknown> = {
           timestamp: data.timestamp,
           startedAt: deps.startedAt,
           deleteGracePeriodMs: deps.deleteGracePeriodMs,
-          status: deps.cloudflareService.getStatus(),
+          status: deps.cloudflareService.getStatus(), // local fields, no API call
           tunnels: data.tunnels,
-          unmanagedRoutes,
-          accessProtection,
-        });
+        };
+
+        // unmanagedRoutes/accessProtection cost ~8 Cloudflare API calls each
+        // (1 for ingress + 1 to list Access apps + 1 per app for its
+        // policies). Cloudflare's account-wide limit is 1200 req/5min,
+        // shared with cloudflared and everything else on this account --
+        // only fetch this on demand (page load / manual refresh), never on
+        // the automatic polling tick.
+        if (url.searchParams.has("live")) {
+          if (url.searchParams.has("fresh")) {
+            cloudflareCache = null;
+          }
+          const managedHostnames = new Set(Object.keys(data.tunnels));
+          try {
+            const cf = await getCloudflareState(deps.cloudflareService);
+            response.unmanagedRoutes = cf.ingressRules.filter(
+              (rule) => !managedHostnames.has(rule.hostname)
+            );
+            response.accessProtection = cf.accessProtection;
+          } catch (err) {
+            logger.error({ err }, "Failed to fetch live Cloudflare tunnel state");
+          }
+        }
+
+        return Response.json(response);
       }
 
       if (url.pathname === "/api/logs") {
@@ -304,7 +307,7 @@ async function deleteRoute(hostname, btn) {
     if (!res.ok || !body.success) throw new Error(body.error || 'delete failed');
 
     showToast(\`Ruta \${hostname} borrada correctamente\`, 'success');
-    await refreshState();
+    await refreshState(true, true);
   } catch (e) {
     showToast(\`No se pudo borrar \${hostname}: \${e.message}\`, 'error');
     row.classList.remove('row-deleting');
@@ -314,9 +317,26 @@ async function deleteRoute(hostname, btn) {
 }
 window.deleteRoute = deleteRoute;
 
-async function refreshState(force) {
-  const res = await fetch(force ? '/api/state?fresh=1' : '/api/state');
+// unmanagedRoutes/accessProtection only arrive when we explicitly ask for
+// live=1 (page load, manual refresh). The automatic poll omits them to
+// avoid spending Cloudflare's account-wide rate limit in the background --
+// keep showing the last known values in between instead of blanking them.
+let lastLive = { unmanagedRoutes: [], accessProtection: {} };
+
+async function refreshState(live, fresh) {
+  const params = [];
+  if (live) params.push('live=1');
+  if (fresh) params.push('fresh=1');
+  const res = await fetch('/api/state' + (params.length ? '?' + params.join('&') : ''));
   const data = await res.json();
+  if (live) {
+    lastLive = {
+      unmanagedRoutes: data.unmanagedRoutes || [],
+      accessProtection: data.accessProtection || {},
+    };
+  }
+  data.unmanagedRoutes = lastLive.unmanagedRoutes;
+  data.accessProtection = lastLive.accessProtection;
 
   const s = data.status;
   document.getElementById('status-bar').innerHTML = \`
@@ -390,7 +410,7 @@ async function manualRefresh() {
   btn.disabled = true;
   btn.textContent = 'Actualizando...';
   try {
-    await Promise.all([refreshState(true), refreshLogs()]);
+    await Promise.all([refreshState(true, true), refreshLogs()]);
     showToast('Datos actualizados', 'success');
   } catch (e) {
     showToast('No se pudo actualizar: ' + e.message, 'error');
@@ -401,7 +421,11 @@ async function manualRefresh() {
 }
 window.manualRefresh = manualRefresh;
 
-refresh();
+// Initial load fetches everything, including the Cloudflare-backed data.
+// The recurring timer below only hits the free, local part of /api/state --
+// see refreshState().
+refreshState(true).catch(console.error);
+refreshLogs().catch(console.error);
 setInterval(refresh, 15000);
 </script>
 </body>
