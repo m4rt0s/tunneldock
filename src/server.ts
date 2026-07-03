@@ -46,6 +46,10 @@ export function startDashboard(port: number, deps: ServerDeps): void {
         const data = deps.dataService.loadData();
         const managedHostnames = new Set(Object.keys(data.tunnels));
 
+        if (url.searchParams.has("fresh")) {
+          cloudflareCache = null;
+        }
+
         let ingressRules: Array<{ hostname: string; service: string }> = [];
         let accessProtection: Record<string, { appName: string; policies: string[] }> = {};
         try {
@@ -133,7 +137,14 @@ const DASHBOARD_HTML = `<!doctype html>
   }
   h1 { font-size: 18px; font-weight: 500; margin: 0 0 4px; }
   h2 { font-size: 14px; font-weight: 500; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-  .sub { color: var(--muted); margin-bottom: 20px; }
+  .sub { color: var(--muted); }
+  .header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+  .btn-refresh {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 14px; font-size: 13px; cursor: pointer; white-space: nowrap;
+  }
+  .btn-refresh:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-refresh:disabled { opacity: 0.6; cursor: default; }
   .status-bar {
     display: flex; flex-wrap: wrap; gap: 20px; background: var(--panel);
     border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; margin-bottom: 24px;
@@ -198,8 +209,13 @@ const DASHBOARD_HTML = `<!doctype html>
 <body>
   <div id="toast-container"></div>
 
-  <h1>TunnelDock</h1>
-  <div class="sub">Cloudflare Tunnel automático por labels de Docker</div>
+  <div class="header-row">
+    <div>
+      <h1>TunnelDock</h1>
+      <div class="sub">Cloudflare Tunnel automático por labels de Docker</div>
+    </div>
+    <button class="btn-refresh" id="refresh-btn" onclick="manualRefresh()">Actualizar</button>
+  </div>
 
   <div class="status-bar" id="status-bar"></div>
 
@@ -279,8 +295,8 @@ async function deleteRoute(hostname, btn) {
 }
 window.deleteRoute = deleteRoute;
 
-async function refreshState() {
-  const res = await fetch('/api/state');
+async function refreshState(force) {
+  const res = await fetch(force ? '/api/state?fresh=1' : '/api/state');
   const data = await res.json();
 
   const s = data.status;
@@ -351,6 +367,22 @@ function refresh() {
   refreshState().catch(console.error);
   refreshLogs().catch(console.error);
 }
+
+async function manualRefresh() {
+  const btn = document.getElementById('refresh-btn');
+  btn.disabled = true;
+  btn.textContent = 'Actualizando...';
+  try {
+    await Promise.all([refreshState(true), refreshLogs()]);
+    showToast('Datos actualizados', 'success');
+  } catch (e) {
+    showToast('No se pudo actualizar: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Actualizar';
+  }
+}
+window.manualRefresh = manualRefresh;
 
 refresh();
 setInterval(refresh, 3000);
