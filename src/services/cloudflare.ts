@@ -263,6 +263,23 @@ export class CloudflareService {
     return (match as { id?: string } | undefined)?.id ?? null;
   }
 
+  // Finds an existing Access Application for this exact hostname, regardless
+  // of who created it. Used so a fresh tunneldock.access label "adopts" an
+  // app someone already configured manually instead of trying to create a
+  // second one for the same domain (which Cloudflare would likely reject,
+  // or worse, silently allow as a confusing duplicate).
+  private async findApplicationByHostname(
+    hostname: string
+  ): Promise<{ id: string; name: string } | null> {
+    const apps = await this.cloudflare.zeroTrust.access.applications.list({
+      account_id: this.accountId,
+    });
+    const match = (apps.result ?? []).find(
+      (a) => (a as { domain?: string }).domain?.split("/")[0] === hostname
+    ) as { id?: string; name?: string } | undefined;
+    return match?.id ? { id: match.id, name: match.name ?? hostname } : null;
+  }
+
   // Creates or updates the Access Application for `hostname` so it's
   // protected by the named reusable policy. Returns the Application ID to
   // persist locally (so a later label removal knows it's safe to delete
@@ -282,24 +299,41 @@ export class CloudflareService {
       return null;
     }
 
+    // No local tracking yet doesn't mean no app exists -- it might be one
+    // configured by hand. Adopt it (update in place, keeping its existing
+    // display name) instead of creating a conflicting duplicate for the
+    // same domain.
+    let appId = existingAppId;
+    let appName = hostname;
+    if (!appId) {
+      const found = await this.findApplicationByHostname(hostname);
+      if (found) {
+        appId = found.id;
+        appName = found.name;
+      }
+    }
+
     const appParams = {
       account_id: this.accountId,
       domain: hostname,
       type: "self_hosted",
-      name: hostname,
+      name: appName,
       policies: [policyId],
     };
 
-    if (existingAppId) {
-      await this.cloudflare.zeroTrust.access.applications.update(existingAppId, appParams as any);
-      logger.info({ hostname, policyName, appId: existingAppId }, "Updated Access application");
-      return existingAppId;
+    if (appId) {
+      await this.cloudflare.zeroTrust.access.applications.update(appId, appParams as any);
+      logger.info(
+        { hostname, policyName, appId, adopted: !existingAppId },
+        "Updated Access application"
+      );
+      return appId;
     }
 
     const created = await this.cloudflare.zeroTrust.access.applications.create(appParams as any);
-    const appId = (created as { id?: string }).id ?? null;
-    logger.info({ hostname, policyName, appId }, "Created Access application");
-    return appId;
+    const createdId = (created as { id?: string }).id ?? null;
+    logger.info({ hostname, policyName, appId: createdId }, "Created Access application");
+    return createdId;
   }
 
   // Deletes an Access Application tunneldock itself created (identified by
