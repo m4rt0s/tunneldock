@@ -2,6 +2,11 @@ import { default as Cloudflare } from "cloudflare";
 import { TunnelConfig } from "../types";
 import { logger } from "../utils/logger";
 
+// The SDK's Ingress type marks `hostname` as required, but the real
+// Cloudflare API omits it entirely for the catch-all rule (verified
+// directly against the API) -- the cast documents that one known gap.
+const CATCH_ALL_RULE = { service: "http_status:404" } as any;
+
 export class CloudflareService {
   private cloudflare: Cloudflare;
   private accountId: string;
@@ -9,14 +14,33 @@ export class CloudflareService {
   private domain: string;
 
   constructor() {
-    this.cloudflare = new Cloudflare({
-      apiEmail: process.env.CF_API_EMAIL || "",
-      // CF_API_TOKEN is actually the Global API Key (see README "Security
-      // note"). The Cloudflare SDK requires it as `apiKey`, not `apiToken` --
-      // `apiToken` is for real Bearer-token auth and rejects this value with
-      // "Invalid access token" (error 9109).
-      apiKey: process.env.CF_API_TOKEN || "",
-    });
+    // Two auth modes, in priority order:
+    //   1. CF_API_TOKEN: a real scoped Bearer token (Zone:DNS:Edit +
+    //      Account:Cloudflare Tunnel:Edit + Account Settings:Read + Zone:Read).
+    //      Preferred -- limited to exactly what this app touches.
+    //   2. CF_API_KEY + CF_API_EMAIL: the legacy Global API Key, which grants
+    //      full account access. Only used if no CF_API_TOKEN is set. See
+    //      README "Security note" for why this is best avoided.
+    if (process.env.CF_API_TOKEN) {
+      logger.info("Using scoped Cloudflare API Token for authentication");
+      this.cloudflare = new Cloudflare({
+        apiToken: process.env.CF_API_TOKEN,
+      });
+    } else if (process.env.CF_API_KEY && process.env.CF_API_EMAIL) {
+      logger.warn(
+        "Using legacy Global API Key -- this grants full Cloudflare account " +
+          "access, not just this zone/tunnel. Prefer CF_API_TOKEN if possible."
+      );
+      this.cloudflare = new Cloudflare({
+        apiEmail: process.env.CF_API_EMAIL,
+        apiKey: process.env.CF_API_KEY,
+      });
+    } else {
+      throw new Error(
+        "No Cloudflare credentials configured: set either CF_API_TOKEN " +
+          "(preferred) or both CF_API_KEY and CF_API_EMAIL"
+      );
+    }
     this.accountId = process.env.CF_ACCOUNT_ID || "";
     this.zoneId = process.env.CF_ZONE_ID || "";
     this.domain = "";
@@ -155,9 +179,12 @@ export class CloudflareService {
       };
 
       // Get current ingress rules or initialize with default catch-all.
-      // No `hostname` field -- see the note in deleteTunnelConfig.
+      // No `hostname` field -- see the note in deleteTunnelConfig. The cast
+      // is needed because the SDK's Ingress type marks `hostname` as
+      // required even though the real API omits it for the catch-all rule
+      // (verified directly against the API).
       let ingressRules = currentConfig.config?.ingress || [
-        { service: "http_status:404" },
+        CATCH_ALL_RULE,
       ];
 
       // Find if there's an existing rule for this hostname
@@ -253,7 +280,7 @@ export class CloudflareService {
       // hostname) that Cloudflare rejects with a 400 on every cleanup.
       const hasCatchAll = ingressRules.some((rule) => !rule.hostname);
       if (!hasCatchAll) {
-        ingressRules.push({ service: "http_status:404" });
+        ingressRules.push(CATCH_ALL_RULE);
       }
 
       const tunnelConfig = {

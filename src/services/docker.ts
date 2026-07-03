@@ -42,6 +42,32 @@ export class DockerService {
     }));
   }
 
+  // Streams container lifecycle events (start/die/stop/destroy) instead of
+  // relying on a polling interval. A fixed-interval snapshot comparison can
+  // miss a transition entirely if a container restarts faster than the
+  // interval (reproduced with a <1s restart against a 1s poll) -- the Docker
+  // events API guarantees delivery of every state change as it happens.
+  async subscribeToEvents(
+    onEvent: (containerId: string, action: string) => void
+  ): Promise<void> {
+    const stream = await this.docker.getEvents({
+      filters: { type: ["container"], event: ["start", "die", "stop", "destroy"] },
+    });
+    stream.on("data", (chunk: Buffer) => {
+      try {
+        const event = JSON.parse(chunk.toString());
+        if (event.Actor?.ID) {
+          onEvent(event.Actor.ID, event.Action);
+        }
+      } catch (err) {
+        logger.error({ err }, "Failed to parse Docker event");
+      }
+    });
+    stream.on("error", (err: Error) => {
+      logger.error({ err }, "Docker event stream error");
+    });
+  }
+
   private parseDotNotationLabels(labels: Record<string, string>): DockerLabelConfig {
     const config: DockerLabelConfig = {
       originRequest: {}  // Initialize with empty object to avoid undefined
@@ -104,15 +130,13 @@ export class DockerService {
 
     const containerName = container.Names[0].replace("/", "");
     let hostname: string;
-    
+    const hostnameNeededDomainAppended =
+      !!config.hostname && !config.hostname.endsWith(this.domain);
+
     if (config.hostname) {
-      if (!config.hostname.endsWith(this.domain)) {
-        hostname = `${config.hostname}.${this.domain}`;
-        logger.warn({ originalHostname: config.hostname, newHostname: hostname }, 
-          'Custom hostname did not include domain, appending domain');
-      } else {
-        hostname = config.hostname;
-      }
+      hostname = hostnameNeededDomainAppended
+        ? `${config.hostname}.${this.domain}`
+        : config.hostname;
     } else {
       hostname = `${containerName}.${this.domain}`;
     }
@@ -129,6 +153,12 @@ export class DockerService {
     }
 
     if (previousState !== container.State && container.State === "running") {
+      if (hostnameNeededDomainAppended) {
+        logger.warn(
+          { originalHostname: config.hostname, newHostname: hostname },
+          "Custom hostname did not include domain, appending domain"
+        );
+      }
       const tunnelConfig = dockerTunnelConfigSchema.parse({
         containerName,
         hostname,

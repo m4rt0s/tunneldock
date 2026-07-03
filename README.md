@@ -2,14 +2,18 @@
 
 > Fork of [radityaharya/tunneldock](https://github.com/radityaharya/tunneldock), vendored here because upstream has minimal commit history and no releases. See [Security note](#security-note) before deploying.
 
-TunnelDock automatically manages Cloudflare Tunnel configurations for Docker containers. It monitors container state changes and configures Cloudflare Tunnels and DNS records accordingly.
+TunnelDock automatically manages Cloudflare Tunnel configurations for Docker containers. It listens to Docker's container events (`start`/`die`/`stop`/`destroy`) and configures Cloudflare Tunnels and DNS records accordingly.
 
 ## Features
 
 - Automatic Cloudflare Tunnel configuration for Docker containers
 - DNS record management via Cloudflare API
-- Container state monitoring
+- Event-driven container monitoring, not polling (see below) -- with a long-interval fallback pass (`TUNNELDOCK_WATCH_INTERVAL`) in case the event stream ever drops something
 - Configurable via Docker labels
+
+### Why events, not polling
+
+Upstream compared container-list snapshots on a fixed interval (default 1s). That misses a transition entirely if a container restarts faster than the interval -- reproduced here by restarting a container in under a second and watching tunneldock never notice. Docker's `/events` endpoint delivers every `start`/`die`/`stop` as a discrete event with no timing window to lose, so that's what `src/services/docker.ts`'s `subscribeToEvents()` uses instead. A reconciliation pass still runs on every event (debounced 250ms to coalesce bursts like a `docker compose up` restarting several containers at once), so the actual sync/cleanup logic is unchanged -- only what triggers it is different.
 
 ## Prerequisites
 
@@ -29,10 +33,13 @@ TunnelDock automatically manages Cloudflare Tunnel configurations for Docker con
    cd tunneldock
    ```
 
-2. Create a `.env` file with your Cloudflare credentials:
+2. Create a `.env` file with your Cloudflare credentials (see `env.example`):
    ```env
-   CF_API_TOKEN=your_api_token
-   CF_API_EMAIL=your_email
+   # Preferred: a scoped API Token
+   CF_API_TOKEN=your_scoped_api_token
+   # Legacy fallback instead of CF_API_TOKEN -- see "Security note"
+   # CF_API_KEY=your_global_api_key
+   # CF_API_EMAIL=your_email
    CF_ACCOUNT_ID=your_account_id
    CF_ZONE_ID=your_zone_id
    CF_TUNNEL_ID=your_tunnel_id
@@ -50,14 +57,20 @@ That's it! TunnelDock will now monitor your Docker containers and manage Cloudfl
 
 ## Security note
 
-`CF_API_TOKEN` here is **not** a scoped Cloudflare API Token. The Cloudflare service in this codebase only implements the legacy `X-Auth-Email` + `X-Auth-Key` (Global API Key) auth scheme — there is no way to run this with a permission-limited token. The Global API Key grants full access to the entire Cloudflare account (every zone, every tunnel, billing), not just the zone/tunnel you're configuring.
+Set `CF_API_TOKEN` to a scoped Cloudflare API Token with only:
+- `Account.Cloudflare Tunnel:Edit`
+- `Zone.DNS:Edit`
+- `Zone.Zone:Read`
+- `Account.Account Settings:Read`
 
-Combined with upstream's minimal review history, that's a real risk if this container is ever compromised. Two mitigations are baked into `docker-compose.yml`:
+That's the minimum this app actually needs (see `src/services/cloudflare.ts`) — nothing else on your account is reachable even if the container is compromised.
 
-- **No direct Docker socket access.** `tunneldock` only ever calls `GET /containers/json` (see `src/services/docker.ts`). Instead of mounting `/var/run/docker.sock` into it, a [`tecnativa/docker-socket-proxy`](https://github.com/Tecnativa/docker-socket-proxy) sits in front with only `CONTAINERS=1` enabled — everything else (exec, create, start/stop, volumes...) is blocked by default. `tunneldock` talks to it over `DOCKER_HOST=tcp://docker-socket-proxy:2375`, dockerode picks that up automatically.
-- **Isolate the Cloudflare account if you can.** If this account has other zones/tunnels you care about, consider a dedicated Cloudflare account for whatever this manages, so a compromised Global Key doesn't reach unrelated infrastructure.
+`CF_API_KEY` + `CF_API_EMAIL` (the legacy Global API Key) is still supported as a fallback if `CF_API_TOKEN` is unset, but it grants full access to the entire Cloudflare account (every zone, every tunnel, billing) — only use it if your Cloudflare plan/token type genuinely can't cover the calls above with a scoped token.
 
-If you want scoped-token auth instead, look at [DockFlare](https://github.com/ChrispyBacon-dev/DockFlare) — heavier (needs Redis) but actively maintained and uses real API Tokens.
+Regardless of which auth mode you use, `docker-compose.yml` also isolates Docker socket access:
+
+- **No direct Docker socket access.** `tunneldock` only ever calls `GET /containers/json` and `GET /events` (see `src/services/docker.ts`). Instead of mounting `/var/run/docker.sock` into it, a [`tecnativa/docker-socket-proxy`](https://github.com/Tecnativa/docker-socket-proxy) sits in front with only `CONTAINERS=1` and `EVENTS=1` enabled — everything else (exec, create, start/stop, volumes...) is blocked by default. `tunneldock` talks to it over `DOCKER_HOST=tcp://docker-socket-proxy:2375`, dockerode picks that up automatically.
+- **If you must use the legacy Global API Key**, consider a dedicated Cloudflare account for whatever this manages, so a compromised key doesn't reach unrelated infrastructure.
 
 ## Environment Variables
 

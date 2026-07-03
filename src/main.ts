@@ -22,19 +22,23 @@ class TunnelDock {
   }
 
   private validateEnvironment(): void {
-    const requiredEnvVars = [
-      "CF_API_TOKEN",
-      "CF_API_EMAIL",
-      "CF_ACCOUNT_ID",
-      "CF_TUNNEL_ID",
-      "CF_ZONE_ID",
-    ];
+    const requiredEnvVars = ["CF_ACCOUNT_ID", "CF_TUNNEL_ID", "CF_ZONE_ID"];
 
     const missingVars = requiredEnvVars.filter(
       (varName) => !process.env[varName]
     );
     if (missingVars.length > 0) {
       logger.error({ missingVars }, "Missing required environment variables");
+      process.exit(1);
+    }
+
+    const hasToken = !!process.env.CF_API_TOKEN;
+    const hasLegacyKey = !!(process.env.CF_API_KEY && process.env.CF_API_EMAIL);
+    if (!hasToken && !hasLegacyKey) {
+      logger.error(
+        "Missing Cloudflare credentials: set CF_API_TOKEN, or both " +
+          "CF_API_KEY and CF_API_EMAIL"
+      );
       process.exit(1);
     }
 
@@ -159,44 +163,65 @@ class TunnelDock {
     }
   }
 
-  async watchContainers(): Promise<void> {
-    let previousContainers: CustomContainerInfo[] = [];
+  // One full pass: sync any container that transitioned to running since
+  // `previousContainers`, then clean up anything that's no longer active.
+  // Shared by both the event-triggered path and the fallback interval below,
+  // so a Docker event and a periodic tick behave identically.
+  private async runReconciliationPass(
+    previousContainers: CustomContainerInfo[]
+  ): Promise<CustomContainerInfo[]> {
+    const containers = await this.dockerService.getContainerInfo();
+    const currentData = this.dataService.loadData();
 
-    try {
-      logger.info(
-        { watchInterval: this.watchInterval },
-        "Starting container and tunnel monitoring"
+    this.dataService.saveData({
+      timestamp: new Date().toISOString(),
+      containers,
+      tunnels: currentData.tunnels || {},
+      domains: currentData.domains || {},
+    });
+
+    for (const container of containers) {
+      const previousContainer = previousContainers.find(
+        (prev) => prev.Names[0] === container.Names[0]
       );
-
-      while (true) {
-        const containers = await this.dockerService.getContainerInfo();
-        const currentData = this.dataService.loadData();
-
-        // Update stored container data while preserving tunnels and domains
-        this.dataService.saveData({
-          timestamp: new Date().toISOString(),
-          containers,
-          tunnels: currentData.tunnels || {},
-          domains: currentData.domains || {},
-        });
-
-        // Process each container
-        for (const container of containers) {
-          const previousContainer = previousContainers.find(
-            (prev) => prev.Names[0] === container.Names[0]
-          );
-          await this.syncContainer(container, previousContainer?.State);
-        }
-
-        // Clean up stale records
-        await this.cleanupStaleRecords(containers);
-
-        previousContainers = containers;
-        await new Promise((resolve) => setTimeout(resolve, this.watchInterval));
-      }
-    } catch (error) {
-      logger.error({ err: error }, "Error in monitoring loop");
+      await this.syncContainer(container, previousContainer?.State);
     }
+
+    await this.cleanupStaleRecords(containers);
+
+    return containers;
+  }
+
+  async watchContainers(): Promise<void> {
+    logger.info("Starting container and tunnel monitoring (event-driven)");
+
+    // Initial pass with an empty "previous" snapshot: any managed container
+    // that's already running gets treated as a fresh transition, so labels
+    // added before tunneldock started are picked up without a restart.
+    let containers = await this.runReconciliationPass([]);
+
+    let passPending = false;
+    const triggerPass = async () => {
+      if (passPending) return; // coalesce bursts (e.g. `compose up` restarting several containers at once)
+      passPending = true;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      try {
+        containers = await this.runReconciliationPass(containers);
+      } catch (error) {
+        logger.error({ err: error }, "Error in event-triggered reconciliation pass");
+      } finally {
+        passPending = false;
+      }
+    };
+
+    await this.dockerService.subscribeToEvents((containerId, action) => {
+      logger.debug({ containerId, action }, "Docker event received");
+      void triggerPass();
+    });
+
+    // Fallback safety net in case the event stream ever drops or misses
+    // something -- not the primary detection path anymore, just a backstop.
+    setInterval(() => void triggerPass(), this.watchInterval);
   }
 
   async initialize(): Promise<void> {
