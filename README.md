@@ -14,6 +14,7 @@ TunnelDock automatically manages Cloudflare Tunnel configurations for Docker con
 ## Prerequisites
 
 - Docker and Docker Compose
+- **Your `cloudflared` container must be on the same Docker network as the containers TunnelDock will manage.** Generated ingress rules point at `http://<container-name>:<port>` (the origin is reached *from cloudflared's own container*, not from the host) -- upstream originally hardcoded `localhost`, which only works if cloudflared shares a network namespace with every service, and produces a 502 otherwise.
 - A Cloudflare account with:
   - API token
   - Account ID

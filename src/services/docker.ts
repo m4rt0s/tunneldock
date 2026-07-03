@@ -121,7 +121,9 @@ export class DockerService {
     const protocol = config.service?.protocol || 'http';
     const path = config.service?.path || '';
 
-    let service = `${protocol}://localhost:${port}`;
+    // Not "localhost": cloudflared runs in its own container, so the origin
+    // must be reachable by the *managed* container's Docker network name.
+    let service = `${protocol}://${containerName}:${port}`;
     if (path) {
       service += path.startsWith('/') ? path : `/${path}`;
     }
