@@ -15,25 +15,44 @@ interface ServerDeps {
 // (several requests each), which is too slow/wasteful to redo on every
 // dashboard poll (every 3s). Cache briefly instead.
 const CLOUDFLARE_CACHE_TTL_MS = 20_000;
-let cloudflareCache: {
+type CloudflareState = {
   at: number;
   ingressRules: Array<{ hostname: string; service: string }>;
   accessProtection: Record<string, { appName: string; policies: string[] }>;
-} | null = null;
+};
+let cloudflareCache: CloudflareState | null = null;
+// De-dupes concurrent fetches: without this, an in-flight fetch that started
+// *before* a delete (and so still sees the old, undeleted route) can finish
+// *after* the delete's own cache invalidation and overwrite it with stale
+// data -- reproduced live as a route lingering in the UI well past its
+// actual deletion. Every caller while a fetch is running awaits the same
+// promise instead of racing their own.
+let inFlightFetch: Promise<CloudflareState> | null = null;
 
 async function getCloudflareState(cloudflareService: CloudflareService) {
   if (cloudflareCache && Date.now() - cloudflareCache.at < CLOUDFLARE_CACHE_TTL_MS) {
     return cloudflareCache;
   }
-  const [ingressRules, accessProtection] = await Promise.all([
-    cloudflareService.getIngressRules(),
-    cloudflareService.getAccessProtection().catch((err) => {
-      logger.error({ err }, "Failed to fetch Access protection (missing token scope?)");
-      return {};
-    }),
-  ]);
-  cloudflareCache = { at: Date.now(), ingressRules, accessProtection };
-  return cloudflareCache;
+  if (inFlightFetch) {
+    return inFlightFetch;
+  }
+  inFlightFetch = (async () => {
+    const [ingressRules, accessProtection] = await Promise.all([
+      cloudflareService.getIngressRules(),
+      cloudflareService.getAccessProtection().catch((err) => {
+        logger.error({ err }, "Failed to fetch Access protection (missing token scope?)");
+        return {};
+      }),
+    ]);
+    const state = { at: Date.now(), ingressRules, accessProtection };
+    cloudflareCache = state;
+    return state;
+  })();
+  try {
+    return await inFlightFetch;
+  } finally {
+    inFlightFetch = null;
+  }
 }
 
 export function startDashboard(port: number, deps: ServerDeps): void {
@@ -312,7 +331,7 @@ async function refreshState(force) {
   const tunnelEntries = Object.entries(data.tunnels || {});
   const tunnelsHtml = tunnelEntries.length === 0
     ? '<div class="empty">Ninguna ruta gestionada todavía</div>'
-    : \`<table><thead><tr><th>Hostname</th><th>Servicio</th><th>Access</th><th>DNS</th><th>Config</th><th>Última sync</th><th>Estado</th><th></th></tr></thead><tbody>
+    : \`<table><thead><tr><th>Hostname</th><th>Servicio</th><th>Access</th><th>Última sync</th><th>Estado</th><th></th></tr></thead><tbody>
         \${tunnelEntries.map(([hostname, t]) => {
           let stateBadge = '<span class="badge ok">activa</span>';
           if (t.staleSince) {
@@ -325,8 +344,6 @@ async function refreshState(force) {
             <td>\${hostnameLink(hostname)}</td>
             <td><code>\${esc(t.service)}</code></td>
             <td>\${accessBadge(hostname, data.accessProtection || {})}</td>
-            <td>\${esc(t.dnsStatus || '-')}</td>
-            <td>\${esc(t.configStatus || '-')}</td>
             <td>hace \${timeAgo(t.lastSync)}</td>
             <td>\${stateBadge}</td>
             <td><button class="btn-delete" onclick="deleteRoute('\${esc(hostname)}', this)">Borrar</button></td>
@@ -385,7 +402,7 @@ async function manualRefresh() {
 window.manualRefresh = manualRefresh;
 
 refresh();
-setInterval(refresh, 3000);
+setInterval(refresh, 15000);
 </script>
 </body>
 </html>`;
