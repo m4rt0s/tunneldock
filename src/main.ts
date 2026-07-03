@@ -257,8 +257,15 @@ class TunnelDock {
     });
 
     for (const container of containers) {
+      // Match by container ID, not name: `docker compose up --force-recreate`
+      // destroys the old container and starts a brand new one (new ID, same
+      // name), which is exactly when label changes take effect. Matching by
+      // name would see "running" both before and after with nothing in
+      // between, so the transition (and the new labels) would never be
+      // detected -- reproduced live by adding tunneldock.access to an
+      // already-managed container and recreating it, which synced nothing.
       const previousContainer = previousContainers.find(
-        (prev) => prev.Names[0] === container.Names[0]
+        (prev) => prev.Id === container.Id
       );
       await this.syncContainer(container, previousContainer?.State);
     }

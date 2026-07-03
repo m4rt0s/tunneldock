@@ -37,6 +37,7 @@ export const tunnelConfigSchema = baseTunnelSchema.extend({
 });
 
 export const customContainerInfoSchema = z.object({
+  Id: z.string(),
   Names: z.array(z.string()),
   Image: z.string(),
   State: z.string(),
