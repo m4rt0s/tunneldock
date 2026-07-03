@@ -149,26 +149,31 @@ export class CloudflareService {
       account_id: this.accountId,
     });
 
-    for (const app of apps.result ?? []) {
-      const domain = (app as { domain?: string }).domain;
-      const appId = (app as { id?: string }).id;
-      const appName = (app as { name?: string }).name || "Access";
-      if (!domain || !appId) continue;
+    // One policies.list() call per app -- run them concurrently instead of
+    // sequentially. Same total request count (still counts against the rate
+    // limit the same), but doesn't serialize their latency one after another.
+    await Promise.all(
+      (apps.result ?? []).map(async (app) => {
+        const domain = (app as { domain?: string }).domain;
+        const appId = (app as { id?: string }).id;
+        const appName = (app as { name?: string }).name || "Access";
+        if (!domain || !appId) return;
 
-      // domain can include a path (e.g. "host.example.com/admin"); we only
-      // route by hostname, so match on that part.
-      const hostname = domain.split("/")[0];
+        // domain can include a path (e.g. "host.example.com/admin"); we only
+        // route by hostname, so match on that part.
+        const hostname = domain.split("/")[0];
 
-      const policies = await this.cloudflare.zeroTrust.access.applications.policies.list(
-        appId,
-        { account_id: this.accountId }
-      );
-      const policyNames = (policies.result ?? [])
-        .map((p) => (p as { name?: string }).name)
-        .filter((name): name is string => !!name);
+        const policies = await this.cloudflare.zeroTrust.access.applications.policies.list(
+          appId,
+          { account_id: this.accountId }
+        );
+        const policyNames = (policies.result ?? [])
+          .map((p) => (p as { name?: string }).name)
+          .filter((name): name is string => !!name);
 
-      result[hostname] = { appName, policies: policyNames };
-    }
+        result[hostname] = { appName, policies: policyNames };
+      })
+    );
 
     return result;
   }

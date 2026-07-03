@@ -12,8 +12,12 @@ interface ServerDeps {
 }
 
 // Ingress rules and Access protection come from live Cloudflare API calls
-// (several requests each), which is too slow/wasteful to redo on every
-// dashboard poll (every 3s). Cache briefly instead.
+// (several requests each). Stale-while-revalidate: once we have any cached
+// value, always answer instantly with it and refresh in the background --
+// never block a page load on Cloudflare's latency just because the 20s TTL
+// expired. Only the very first fetch after startup (no cache yet) has to
+// wait, and the manual refresh button can force a real wait when the user
+// explicitly wants to know the fetch actually happened.
 const CLOUDFLARE_CACHE_TTL_MS = 20_000;
 type CloudflareState = {
   at: number;
@@ -29,13 +33,8 @@ let cloudflareCache: CloudflareState | null = null;
 // promise instead of racing their own.
 let inFlightFetch: Promise<CloudflareState> | null = null;
 
-async function getCloudflareState(cloudflareService: CloudflareService) {
-  if (cloudflareCache && Date.now() - cloudflareCache.at < CLOUDFLARE_CACHE_TTL_MS) {
-    return cloudflareCache;
-  }
-  if (inFlightFetch) {
-    return inFlightFetch;
-  }
+function fetchFreshCloudflareState(cloudflareService: CloudflareService): Promise<CloudflareState> {
+  if (inFlightFetch) return inFlightFetch;
   inFlightFetch = (async () => {
     const [ingressRules, accessProtection] = await Promise.all([
       cloudflareService.getIngressRules(),
@@ -48,11 +47,30 @@ async function getCloudflareState(cloudflareService: CloudflareService) {
     cloudflareCache = state;
     return state;
   })();
-  try {
-    return await inFlightFetch;
-  } finally {
+  inFlightFetch.finally(() => {
     inFlightFetch = null;
+  });
+  return inFlightFetch;
+}
+
+async function getCloudflareState(cloudflareService: CloudflareService, forceFresh: boolean) {
+  if (forceFresh) {
+    return fetchFreshCloudflareState(cloudflareService);
   }
+
+  const isFresh = cloudflareCache && Date.now() - cloudflareCache.at < CLOUDFLARE_CACHE_TTL_MS;
+  if (isFresh) {
+    return cloudflareCache!;
+  }
+
+  if (cloudflareCache) {
+    // Stale but present: serve it now, let the refresh happen quietly.
+    fetchFreshCloudflareState(cloudflareService).catch(() => {});
+    return cloudflareCache;
+  }
+
+  // Nothing cached yet (first call since startup) -- no choice but to wait.
+  return fetchFreshCloudflareState(cloudflareService);
 }
 
 export function startDashboard(port: number, deps: ServerDeps): void {
@@ -79,12 +97,9 @@ export function startDashboard(port: number, deps: ServerDeps): void {
         // only fetch this on demand (page load / manual refresh), never on
         // the automatic polling tick.
         if (url.searchParams.has("live")) {
-          if (url.searchParams.has("fresh")) {
-            cloudflareCache = null;
-          }
           const managedHostnames = new Set(Object.keys(data.tunnels));
           try {
-            const cf = await getCloudflareState(deps.cloudflareService);
+            const cf = await getCloudflareState(deps.cloudflareService, url.searchParams.has("fresh"));
             response.unmanagedRoutes = cf.ingressRules.filter(
               (rule) => !managedHostnames.has(rule.hostname)
             );
@@ -117,7 +132,6 @@ export function startDashboard(port: number, deps: ServerDeps): void {
             deps.dataService.saveData({ ...data, timestamp: new Date().toISOString() });
           }
 
-          cloudflareCache = null; // force a fresh read on the next /api/state
           logger.info({ hostname }, "Route deleted manually via dashboard");
           return Response.json({ success: true });
         } catch (err) {
