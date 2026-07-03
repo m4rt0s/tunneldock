@@ -154,9 +154,10 @@ export class CloudflareService {
         tcpKeepAlive: 30,
       };
 
-      // Get current ingress rules or initialize with default catch-all
+      // Get current ingress rules or initialize with default catch-all.
+      // No `hostname` field -- see the note in deleteTunnelConfig.
       let ingressRules = currentConfig.config?.ingress || [
-        { service: "http_status:404", hostname: "*" },
+        { service: "http_status:404" },
       ];
 
       // Find if there's an existing rule for this hostname
@@ -245,9 +246,14 @@ export class CloudflareService {
       // Filter out the rule for this hostname
       ingressRules = ingressRules.filter((rule) => rule.hostname !== hostname);
 
-      // Make sure we still have the catch-all rule
-      if (!ingressRules.find((rule) => rule.hostname === "*")) {
-        ingressRules.push({ service: "http_status:404", hostname: "*" });
+      // Cloudflare's catch-all rule omits `hostname` entirely -- it is never
+      // the literal string "*". Comparing against "*" here never matches the
+      // real catch-all, so this used to append a *second* one after it,
+      // producing an invalid config (a non-terminal rule with an empty
+      // hostname) that Cloudflare rejects with a 400 on every cleanup.
+      const hasCatchAll = ingressRules.some((rule) => !rule.hostname);
+      if (!hasCatchAll) {
+        ingressRules.push({ service: "http_status:404" });
       }
 
       const tunnelConfig = {
