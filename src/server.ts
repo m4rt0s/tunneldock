@@ -96,7 +96,8 @@ export function startDashboard(port: number, deps: ServerDeps): void {
           return Response.json({ success: true });
         } catch (err) {
           logger.error({ err }, "Failed to manually delete route");
-          return Response.json({ error: "delete failed" }, { status: 500 });
+          const message = err instanceof Error ? err.message : "delete failed";
+          return Response.json({ error: message }, { status: 500 });
         }
       }
 
@@ -160,7 +161,22 @@ const DASHBOARD_HTML = `<!doctype html>
     border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
   }
   .btn-delete:hover { background: rgba(248,81,73,0.22); }
-  .btn-delete:disabled { opacity: 0.5; cursor: default; }
+  .btn-delete:disabled { opacity: 0.6; cursor: default; }
+  tr.row-deleting { opacity: 0.45; transition: opacity 0.2s; }
+
+  #toast-container {
+    position: fixed; top: 16px; right: 16px; z-index: 1000;
+    display: flex; flex-direction: column; gap: 8px; max-width: min(360px, calc(100vw - 32px));
+  }
+  .toast {
+    padding: 12px 16px; border-radius: 8px; font-size: 13px; font-weight: 500;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    animation: toast-in 0.2s ease-out;
+  }
+  .toast.success { background: #1a3d24; color: var(--ok); border: 1px solid rgba(63,185,80,0.4); }
+  .toast.error { background: #3d1f1e; color: var(--err); border: 1px solid rgba(248,81,73,0.4); }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+
   #logs { max-height: 360px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.6; }
   .log-line { white-space: pre-wrap; word-break: break-word; }
   .log-info { color: var(--text); }
@@ -175,10 +191,13 @@ const DASHBOARD_HTML = `<!doctype html>
     .status-bar { gap: 12px 20px; padding: 12px; }
     th, td { padding: 6px 8px; font-size: 12px; }
     h1 { font-size: 16px; }
+    #toast-container { left: 12px; right: 12px; top: 12px; max-width: none; }
   }
 </style>
 </head>
 <body>
+  <div id="toast-container"></div>
+
   <h1>TunnelDock</h1>
   <div class="sub">Cloudflare Tunnel automático por labels de Docker</div>
 
@@ -223,20 +242,37 @@ function accessBadge(hostname, accessProtection) {
   return \`<span class="badge accent" title="\${esc(protection.appName)}">\${esc(names)}</span>\`;
 }
 
+function showToast(message, type) {
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = \`toast \${type}\`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 4000);
+}
+
 async function deleteRoute(hostname, btn) {
-  if (!confirm(\`¿Borrar la ruta \${hostname}? Esto elimina el DNS y la regla de ingress en Cloudflare.\`)) return;
+  if (!confirm(\`¿Borrar la ruta \${hostname}?\n\nEsto elimina el registro DNS y la regla de ingress en Cloudflare. No se puede deshacer.\`)) return;
+
+  const row = btn.closest('tr');
+  row.classList.add('row-deleting');
   btn.disabled = true;
   btn.textContent = 'Borrando...';
+
   try {
     const res = await fetch('/api/routes/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ hostname }),
     });
-    if (!res.ok) throw new Error('failed');
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.success) throw new Error(body.error || 'delete failed');
+
+    showToast(\`Ruta \${hostname} borrada correctamente\`, 'success');
     await refreshState();
   } catch (e) {
-    alert('No se pudo borrar la ruta. Revisa los logs.');
+    showToast(\`No se pudo borrar \${hostname}: \${e.message}\`, 'error');
+    row.classList.remove('row-deleting');
     btn.disabled = false;
     btn.textContent = 'Borrar';
   }
