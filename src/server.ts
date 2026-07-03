@@ -19,10 +19,19 @@ interface ServerDeps {
 // wait, and the manual refresh button can force a real wait when the user
 // explicitly wants to know the fetch actually happened.
 const CLOUDFLARE_CACHE_TTL_MS = 20_000;
+type ReusablePolicy = {
+  id: string;
+  name: string;
+  decision: string;
+  sessionDuration: string;
+  appCount: number;
+  summary: string;
+};
 type CloudflareState = {
   at: number;
   ingressRules: Array<{ hostname: string; service: string }>;
   accessProtection: Record<string, { appName: string; policies: string[] }>;
+  reusablePolicies: ReusablePolicy[];
 };
 let cloudflareCache: CloudflareState | null = null;
 // De-dupes concurrent fetches: without this, an in-flight fetch that started
@@ -36,14 +45,18 @@ let inFlightFetch: Promise<CloudflareState> | null = null;
 function fetchFreshCloudflareState(cloudflareService: CloudflareService): Promise<CloudflareState> {
   if (inFlightFetch) return inFlightFetch;
   inFlightFetch = (async () => {
-    const [ingressRules, accessProtection] = await Promise.all([
+    const [ingressRules, accessProtection, reusablePolicies] = await Promise.all([
       cloudflareService.getIngressRules(),
       cloudflareService.getAccessProtection().catch((err) => {
         logger.error({ err }, "Failed to fetch Access protection (missing token scope?)");
         return {};
       }),
+      cloudflareService.getReusablePolicies().catch((err) => {
+        logger.error({ err }, "Failed to fetch reusable Access policies");
+        return [];
+      }),
     ]);
-    const state = { at: Date.now(), ingressRules, accessProtection };
+    const state = { at: Date.now(), ingressRules, accessProtection, reusablePolicies };
     cloudflareCache = state;
     return state;
   })();
@@ -104,6 +117,7 @@ export function startDashboard(port: number, deps: ServerDeps): void {
               (rule) => !managedHostnames.has(rule.hostname)
             );
             response.accessProtection = cf.accessProtection;
+            response.reusablePolicies = cf.reusablePolicies;
           } catch (err) {
             logger.error({ err }, "Failed to fetch live Cloudflare tunnel state");
           }
@@ -185,6 +199,19 @@ const DASHBOARD_HTML = `<!doctype html>
   }
   .btn-refresh:hover { border-color: var(--accent); color: var(--accent); }
   .btn-refresh:disabled { opacity: 0.6; cursor: default; }
+
+  .tabs {
+    display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  .tab-btn {
+    background: none; border: none; color: var(--muted); padding: 10px 16px;
+    font-size: 13px; cursor: pointer; white-space: nowrap; border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 500; }
+
   .status-bar {
     display: flex; flex-wrap: wrap; gap: 20px; background: var(--panel);
     border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; margin-bottom: 24px;
@@ -257,17 +284,67 @@ const DASHBOARD_HTML = `<!doctype html>
     <button class="btn-refresh" id="refresh-btn" onclick="manualRefresh()">Actualizar</button>
   </div>
 
-  <div class="status-bar" id="status-bar"></div>
+  <div class="tabs" id="tabs">
+    <button class="tab-btn active" data-tab="general" onclick="switchTab('general')">General</button>
+    <button class="tab-btn" data-tab="unmanaged" onclick="switchTab('unmanaged')">Rutas no gestionadas</button>
+    <button class="tab-btn" data-tab="policies" onclick="switchTab('policies')">Políticas Access</button>
+    <button class="tab-btn" data-tab="help" onclick="switchTab('help')">Ayuda</button>
+  </div>
 
-  <section>
-    <h2>Rutas gestionadas</h2>
-    <div class="table-scroll" id="tunnels-table"></div>
-  </section>
+  <div class="tab-panel" id="tab-general">
+    <div class="status-bar" id="status-bar"></div>
+    <section>
+      <h2>Rutas gestionadas</h2>
+      <div class="table-scroll" id="tunnels-table"></div>
+    </section>
+  </div>
 
-  <section>
-    <h2>Rutas no gestionadas</h2>
-    <div class="table-scroll" id="unmanaged-table"></div>
-  </section>
+  <div class="tab-panel" id="tab-unmanaged" hidden>
+    <section>
+      <h2>Rutas no gestionadas</h2>
+      <p class="sub">Reglas de ingress que existen en el tunnel pero que tunneldock no ha creado -- configuradas a mano.</p>
+      <div class="table-scroll" id="unmanaged-table"></div>
+    </section>
+  </div>
+
+  <div class="tab-panel" id="tab-policies" hidden>
+    <section>
+      <h2>Políticas Access disponibles</h2>
+      <p class="sub">Políticas reutilizables de tu cuenta de Cloudflare. Usa <code>tunneldock.access=&lt;nombre&gt;</code> para proteger una ruta con una de estas.</p>
+      <div class="table-scroll" id="policies-table"></div>
+    </section>
+  </div>
+
+  <div class="tab-panel" id="tab-help" hidden>
+    <section>
+      <h2>Cómo funciona</h2>
+      <p>TunnelDock escucha los eventos de Docker (arranque/parada de contenedores) y, según sus labels, crea o borra automáticamente rutas de Cloudflare Tunnel (DNS + regla de ingress) y, opcionalmente, protección de Access.</p>
+
+      <h2 style="margin-top:24px">Labels disponibles</h2>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Label</th><th>Qué hace</th></tr></thead>
+          <tbody>
+            <tr><td><code>tunneldock.assign=true</code></td><td>Obligatorio. Activa la gestión de este contenedor.</td></tr>
+            <tr><td><code>tunneldock.hostname=miapp</code></td><td>Subdominio a usar. Si no incluye el dominio completo, se le añade automáticamente. Sin este label, se usa el nombre del contenedor.</td></tr>
+            <tr><td><code>tunneldock.service.port=8080</code></td><td>Puerto interno del contenedor al que apuntar. Por defecto usa el primer puerto publicado.</td></tr>
+            <tr><td><code>tunneldock.service.protocol=https</code></td><td>Protocolo hacia el origen. Por defecto <code>http</code>.</td></tr>
+            <tr><td><code>tunneldock.service.path=/admin</code></td><td>Ruta añadida a la URL de destino, opcional.</td></tr>
+            <tr><td><code>tunneldock.access=Nombre de política</code></td><td>Protege la ruta con una política de Access reutilizable ya existente (ver pestaña "Políticas Access"). Quitar el label borra la protección que tunneldock creó.</td></tr>
+            <tr><td><code>tunneldock.originRequest.noTLSVerify=true</code></td><td>Y el resto de ajustes de <code>originRequest</code> del tunnel (http2Origin, connectTimeout, tcpKeepAlive...).</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 style="margin-top:24px">Cosas a tener en cuenta</h2>
+      <ul>
+        <li>Solo actúa en <b>transiciones</b> de estado (parado→corriendo) o cuando el contenedor se <b>recrea</b> (labels nuevos). Un contenedor que ya estaba corriendo antes de que tunneldock arrancase se recoge en su primera pasada de arranque.</li>
+        <li>Al parar un contenedor gestionado, la ruta no se borra al instante: espera un margen de gracia (por defecto 5 minutos) antes de eliminar el DNS y el ingress, para no generar ruido en cambios/reinicios cortos.</li>
+        <li>tunneldock solo gestiona (crea, actualiza, borra) lo que él mismo ha creado. Rutas y Access Applications configuradas a mano en Cloudflare nunca se tocan.</li>
+        <li>El botón "Borrar" de las tablas de rutas actúa sobre Cloudflare directamente y no tiene margen de gracia -- es inmediato.</li>
+      </ul>
+    </section>
+  </div>
 
   <section>
     <h2>Logs recientes</h2>
@@ -339,7 +416,7 @@ window.deleteRoute = deleteRoute;
 // live=1 (page load, manual refresh). The automatic poll omits them to
 // avoid spending Cloudflare's account-wide rate limit in the background --
 // keep showing the last known values in between instead of blanking them.
-let lastLive = { unmanagedRoutes: [], accessProtection: {} };
+let lastLive = { unmanagedRoutes: [], accessProtection: {}, reusablePolicies: [] };
 
 async function refreshState(live, fresh) {
   const params = [];
@@ -351,10 +428,12 @@ async function refreshState(live, fresh) {
     lastLive = {
       unmanagedRoutes: data.unmanagedRoutes || [],
       accessProtection: data.accessProtection || {},
+      reusablePolicies: data.reusablePolicies || [],
     };
   }
   data.unmanagedRoutes = lastLive.unmanagedRoutes;
   data.accessProtection = lastLive.accessProtection;
+  data.reusablePolicies = lastLive.reusablePolicies;
 
   const s = data.status;
   document.getElementById('status-bar').innerHTML = \`
@@ -401,7 +480,31 @@ async function refreshState(live, fresh) {
           </tr>\`).join('')}
       </tbody></table>\`;
   document.getElementById('unmanaged-table').innerHTML = unmanagedHtml;
+
+  const policies = data.reusablePolicies || [];
+  const policiesHtml = policies.length === 0
+    ? '<div class="empty">No hay políticas de Access reutilizables en esta cuenta</div>'
+    : \`<table><thead><tr><th>Nombre</th><th>Quién entra</th><th>Decisión</th><th>Sesión</th><th>Usada por</th></tr></thead><tbody>
+        \${policies.map(p => \`<tr>
+            <td><code>\${esc(p.name)}</code></td>
+            <td>\${esc(p.summary)}</td>
+            <td><span class="badge \${p.decision === 'allow' ? 'ok' : 'accent'}">\${esc(p.decision)}</span></td>
+            <td>\${esc(p.sessionDuration)}</td>
+            <td>\${p.appCount} app\${p.appCount === 1 ? '' : 's'}</td>
+          </tr>\`).join('')}
+      </tbody></table>\`;
+  document.getElementById('policies-table').innerHTML = policiesHtml;
 }
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === name);
+  });
+  document.querySelectorAll('.tab-panel').forEach(panel => {
+    panel.hidden = panel.id !== 'tab-' + name;
+  });
+}
+window.switchTab = switchTab;
 
 async function refreshLogs() {
   const res = await fetch('/api/logs');

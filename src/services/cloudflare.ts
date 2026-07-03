@@ -7,6 +7,39 @@ import { logger } from "../utils/logger";
 // directly against the API) -- the cast documents that one known gap.
 const CATCH_ALL_RULE = { service: "http_status:404" } as any;
 
+// Turns an Access policy's `include` rules into a short human-readable
+// string. Only handles the rule shapes actually seen in practice (email,
+// service token, everyone, email domain, IdP group) -- anything else falls
+// back to a generic label rather than silently showing nothing.
+function summarizeAccessRules(rules: Array<Record<string, unknown>>): string {
+  const parts: string[] = [];
+
+  const emails = rules
+    .map((r) => (r.email as { email?: string } | undefined)?.email)
+    .filter((e): e is string => !!e);
+  if (emails.length) parts.push(emails.join(", "));
+
+  const domains = rules
+    .map((r) => (r.email_domain as { domain?: string } | undefined)?.domain)
+    .filter((d): d is string => !!d);
+  if (domains.length) parts.push(`dominio: ${domains.join(", ")}`);
+
+  if (rules.some((r) => "service_token" in r || "any_valid_service_token" in r)) {
+    parts.push("Service Token");
+  }
+  if (rules.some((r) => "everyone" in r)) {
+    parts.push("Cualquiera");
+  }
+  if (rules.some((r) => "group" in r || "okta_group" in r || "saml_group" in r || "azure_group" in r || "gsuite_group" in r)) {
+    parts.push("Grupo del proveedor de identidad");
+  }
+  if (rules.some((r) => "ip" in r || "ip_list" in r)) {
+    parts.push("IP concreta");
+  }
+
+  return parts.length ? parts.join(" · ") : "Sin reglas de inclusión configuradas";
+}
+
 export class CloudflareService {
   private cloudflare: Cloudflare;
   private accountId: string;
@@ -176,6 +209,42 @@ export class CloudflareService {
     );
 
     return result;
+  }
+
+  // Every reusable Access policy on the account, with a plain-language
+  // summary of who it lets in -- for the dashboard's "Políticas Access" tab.
+  async getReusablePolicies(): Promise<
+    Array<{
+      id: string;
+      name: string;
+      decision: string;
+      sessionDuration: string;
+      appCount: number;
+      summary: string;
+    }>
+  > {
+    const policies = await this.cloudflare.zeroTrust.access.policies.list({
+      account_id: this.accountId,
+    });
+
+    return (policies.result ?? []).map((p) => {
+      const policy = p as {
+        id?: string;
+        name?: string;
+        decision?: string;
+        session_duration?: string;
+        app_count?: number;
+        include?: Array<Record<string, unknown>>;
+      };
+      return {
+        id: policy.id ?? "",
+        name: policy.name ?? "(sin nombre)",
+        decision: policy.decision ?? "allow",
+        sessionDuration: policy.session_duration ?? "-",
+        appCount: policy.app_count ?? 0,
+        summary: summarizeAccessRules(policy.include ?? []),
+      };
+    });
   }
 
   // Looks up an existing *reusable* Access policy by name (the account-level
