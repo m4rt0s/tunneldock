@@ -164,15 +164,6 @@ export class DockerService {
     }
 
     if (previousState !== container.State && container.State === "running") {
-      if (hostnameNeededDomainAppended) {
-        // Not a warning: writing the short form ("myapp" instead of
-        // "myapp.example.com") is the normal, expected way to use this
-        // label -- nobody wants to repeat the domain in every container.
-        logger.debug(
-          { originalHostname: config.hostname, newHostname: hostname },
-          "Custom hostname did not include domain, appending domain"
-        );
-      }
       const tunnelConfig = dockerTunnelConfigSchema.parse({
         containerName,
         hostname,
