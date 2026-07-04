@@ -304,7 +304,12 @@ export class CloudflareService {
     // display name) instead of creating a conflicting duplicate for the
     // same domain.
     let appId = existingAppId;
-    let appName = hostname;
+    // Default name for a genuinely new app: the subdomain only, not the
+    // full hostname (".mrts.es" on every entry is just noise in the
+    // Cloudflare dashboard's Application list).
+    let appName = hostname.endsWith(`.${this.domain}`)
+      ? hostname.slice(0, -(this.domain.length + 1))
+      : hostname;
     if (!appId) {
       const found = await this.findApplicationByHostname(hostname);
       if (found) {
