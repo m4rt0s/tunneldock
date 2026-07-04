@@ -172,6 +172,28 @@ export class CloudflareService {
       .map((rule) => ({ hostname: rule.hostname!, service: rule.service }));
   }
 
+  // Every DNS record in the zone, not just the CNAMEs tunneldock manages --
+  // for the dashboard's "Registros DNS" tab, so the whole zone is visible in
+  // one place instead of needing the Cloudflare dashboard for anything that
+  // isn't a tunnel route (MX, TXT, other A/CNAME records, etc).
+  async getAllDnsRecords(): Promise<
+    Array<{ type: string; name: string; content: string; proxied: boolean; ttl: number }>
+  > {
+    const records = await this.cloudflare.dns.records.list({
+      zone_id: this.zoneId,
+    });
+    return (records.result ?? []).map((r) => {
+      const rec = r as { type?: string; name?: string; content?: string; proxied?: boolean; ttl?: number };
+      return {
+        type: rec.type ?? "",
+        name: rec.name ?? "",
+        content: rec.content ?? "",
+        proxied: !!rec.proxied,
+        ttl: rec.ttl ?? 1,
+      };
+    });
+  }
+
   // Maps hostname -> Access application name + policy names, for every
   // Access Application whose domain matches one of our routes. A route with
   // no entry here has no Access protection at all.

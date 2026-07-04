@@ -27,11 +27,13 @@ type ReusablePolicy = {
   appCount: number;
   summary: string;
 };
+type DnsRecord = { type: string; name: string; content: string; proxied: boolean; ttl: number };
 type CloudflareState = {
   at: number;
   ingressRules: Array<{ hostname: string; service: string }>;
   accessProtection: Record<string, { appName: string; policies: string[] }>;
   reusablePolicies: ReusablePolicy[];
+  dnsRecords: DnsRecord[];
 };
 let cloudflareCache: CloudflareState | null = null;
 // De-dupes concurrent fetches: without this, an in-flight fetch that started
@@ -45,7 +47,7 @@ let inFlightFetch: Promise<CloudflareState> | null = null;
 function fetchFreshCloudflareState(cloudflareService: CloudflareService): Promise<CloudflareState> {
   if (inFlightFetch) return inFlightFetch;
   inFlightFetch = (async () => {
-    const [ingressRules, accessProtection, reusablePolicies] = await Promise.all([
+    const [ingressRules, accessProtection, reusablePolicies, dnsRecords] = await Promise.all([
       cloudflareService.getIngressRules(),
       cloudflareService.getAccessProtection().catch((err) => {
         logger.error({ err }, "Failed to fetch Access protection (missing token scope?)");
@@ -55,8 +57,12 @@ function fetchFreshCloudflareState(cloudflareService: CloudflareService): Promis
         logger.error({ err }, "Failed to fetch reusable Access policies");
         return [];
       }),
+      cloudflareService.getAllDnsRecords().catch((err) => {
+        logger.error({ err }, "Failed to fetch DNS records");
+        return [];
+      }),
     ]);
-    const state = { at: Date.now(), ingressRules, accessProtection, reusablePolicies };
+    const state = { at: Date.now(), ingressRules, accessProtection, reusablePolicies, dnsRecords };
     cloudflareCache = state;
     return state;
   })();
@@ -118,6 +124,7 @@ export function startDashboard(port: number, deps: ServerDeps): void {
             );
             response.accessProtection = cf.accessProtection;
             response.reusablePolicies = cf.reusablePolicies;
+            response.dnsRecords = cf.dnsRecords;
           } catch (err) {
             logger.error({ err }, "Failed to fetch live Cloudflare tunnel state");
           }
@@ -212,13 +219,6 @@ const DASHBOARD_HTML = `<!doctype html>
   .tab-btn:hover { color: var(--text); }
   .tab-btn.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 500; }
 
-  .status-bar {
-    display: flex; flex-wrap: wrap; gap: 20px; background: var(--panel);
-    border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; margin-bottom: 24px;
-  }
-  .status-item { display: flex; flex-direction: column; gap: 2px; }
-  .status-item .label { color: var(--muted); font-size: 11px; text-transform: uppercase; }
-  .status-item .value { font-size: 14px; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; white-space: nowrap; }
   .badge.ok { background: rgba(63,185,80,0.15); color: var(--ok); }
   .badge.warn { background: rgba(210,153,34,0.15); color: var(--warn); }
@@ -236,10 +236,11 @@ const DASHBOARD_HTML = `<!doctype html>
   .empty { color: var(--muted); padding: 12px 0; }
   .btn-delete {
     background: rgba(248,81,73,0.12); color: var(--err); border: 1px solid rgba(248,81,73,0.3);
-    border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+    border-radius: 6px; padding: 5px 7px; cursor: pointer; display: inline-flex; align-items: center;
   }
   .btn-delete:hover { background: rgba(248,81,73,0.22); }
   .btn-delete:disabled { opacity: 0.6; cursor: default; }
+  .btn-delete svg { display: block; }
   tr.row-deleting { opacity: 0.45; transition: opacity 0.2s; }
 
   #toast-container {
@@ -266,7 +267,6 @@ const DASHBOARD_HTML = `<!doctype html>
   @media (max-width: 640px) {
     body { padding: 12px; font-size: 13px; }
     section { padding: 12px; border-radius: 6px; }
-    .status-bar { gap: 12px 20px; padding: 12px; }
     th, td { padding: 6px 8px; font-size: 12px; }
     h1 { font-size: 16px; }
     #toast-container { left: 12px; right: 12px; top: 12px; max-width: none; }
@@ -285,14 +285,15 @@ const DASHBOARD_HTML = `<!doctype html>
   </div>
 
   <div class="tabs" id="tabs">
-    <button class="tab-btn active" data-tab="general" onclick="switchTab('general')">General</button>
+    <button class="tab-btn active" data-tab="managed" onclick="switchTab('managed')">Rutas gestionadas</button>
     <button class="tab-btn" data-tab="unmanaged" onclick="switchTab('unmanaged')">Rutas no gestionadas</button>
+    <button class="tab-btn" data-tab="dns" onclick="switchTab('dns')">Registros DNS</button>
     <button class="tab-btn" data-tab="policies" onclick="switchTab('policies')">Políticas Access</button>
+    <button class="tab-btn" data-tab="logs" onclick="switchTab('logs')">Logs</button>
     <button class="tab-btn" data-tab="help" onclick="switchTab('help')">Ayuda</button>
   </div>
 
-  <div class="tab-panel" id="tab-general">
-    <div class="status-bar" id="status-bar"></div>
+  <div class="tab-panel" id="tab-managed">
     <section>
       <h2>Rutas gestionadas</h2>
       <div class="table-scroll" id="tunnels-table"></div>
@@ -307,6 +308,14 @@ const DASHBOARD_HTML = `<!doctype html>
     </section>
   </div>
 
+  <div class="tab-panel" id="tab-dns" hidden>
+    <section>
+      <h2>Registros DNS de mrts.es</h2>
+      <p class="sub">Todos los registros de la zona, no solo los del tunnel -- para tener el DNS completo a la vista sin entrar al dashboard de Cloudflare.</p>
+      <div class="table-scroll" id="dns-table"></div>
+    </section>
+  </div>
+
   <div class="tab-panel" id="tab-policies" hidden>
     <section>
       <h2>Políticas Access disponibles</h2>
@@ -315,10 +324,26 @@ const DASHBOARD_HTML = `<!doctype html>
     </section>
   </div>
 
+  <div class="tab-panel" id="tab-logs" hidden>
+    <section>
+      <h2>Logs recientes</h2>
+      <div id="logs"></div>
+    </section>
+  </div>
+
   <div class="tab-panel" id="tab-help" hidden>
     <section>
       <h2>Cómo funciona</h2>
       <p>TunnelDock escucha los eventos de Docker (arranque/parada de contenedores) y, según sus labels, crea o borra automáticamente rutas de Cloudflare Tunnel (DNS + regla de ingress) y, opcionalmente, protección de Access.</p>
+
+      <h2 style="margin-top:24px">Las pestañas</h2>
+      <ul>
+        <li><b>Rutas gestionadas</b>: lo que tunneldock ha creado y sigue vigilando. Cada fila se puede borrar a mano con el icono de papelera.</li>
+        <li><b>Rutas no gestionadas</b>: reglas de ingress que existen en el tunnel pero que tunneldock no creó -- configuradas a mano en algún momento. Se pueden borrar igual, pero tunneldock nunca las toca por su cuenta.</li>
+        <li><b>Registros DNS</b>: la zona completa de Cloudflare (no solo lo relacionado con el tunnel), para verlo todo de un vistazo.</li>
+        <li><b>Políticas Access</b>: qué políticas reutilizables existen, a quién dejan entrar y cuántas apps las usan -- para saber qué nombre poner en <code>tunneldock.access</code>.</li>
+        <li><b>Logs</b>: las últimas 500 líneas de log de tunneldock, coloreadas por nivel.</li>
+      </ul>
 
       <h2 style="margin-top:24px">Labels disponibles</h2>
       <div class="table-scroll">
@@ -336,20 +361,18 @@ const DASHBOARD_HTML = `<!doctype html>
         </table>
       </div>
 
+      <h2 style="margin-top:24px">El botón "Actualizar"</h2>
+      <p>El auto-refresco de cada 15s solo relee datos locales (gratis, sin límite). Los datos de Cloudflare (rutas no gestionadas, DNS, políticas) se cachean 20s y no se piden en el auto-refresco para no gastar la cuota de la API -- el botón "Actualizar" de arriba fuerza una lectura fresca de todo.</p>
+
       <h2 style="margin-top:24px">Cosas a tener en cuenta</h2>
       <ul>
         <li>Solo actúa en <b>transiciones</b> de estado (parado→corriendo) o cuando el contenedor se <b>recrea</b> (labels nuevos). Un contenedor que ya estaba corriendo antes de que tunneldock arrancase se recoge en su primera pasada de arranque.</li>
         <li>Al parar un contenedor gestionado, la ruta no se borra al instante: espera un margen de gracia (por defecto 5 minutos) antes de eliminar el DNS y el ingress, para no generar ruido en cambios/reinicios cortos.</li>
-        <li>tunneldock solo gestiona (crea, actualiza, borra) lo que él mismo ha creado. Rutas y Access Applications configuradas a mano en Cloudflare nunca se tocan.</li>
-        <li>El botón "Borrar" de las tablas de rutas actúa sobre Cloudflare directamente y no tiene margen de gracia -- es inmediato.</li>
+        <li>tunneldock solo gestiona (crea, actualiza, borra) lo que él mismo ha creado. Rutas y Access Applications configuradas a mano en Cloudflare nunca se tocan por su cuenta -- salvo que tú añadas el label a algo que ya existía, en cuyo caso lo adopta.</li>
+        <li>El icono de papelera de las tablas de rutas actúa sobre Cloudflare directamente y no tiene margen de gracia -- es inmediato.</li>
       </ul>
     </section>
   </div>
-
-  <section>
-    <h2>Logs recientes</h2>
-    <div id="logs"></div>
-  </section>
 
 <script>
 function timeAgo(iso) {
@@ -367,6 +390,8 @@ function esc(s) {
 function hostnameLink(hostname) {
   return \`<a class="hostname-link" href="https://\${esc(hostname)}" target="_blank" rel="noopener"><code>\${esc(hostname)}</code></a>\`;
 }
+
+const TRASH_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4h11M5.5 4V2.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V4M6.5 7.2v4M9.5 7.2v4M3.5 4l.7 8.4a1 1 0 0 0 1 .9h5.6a1 1 0 0 0 1-.9L12.5 4"/></svg>';
 
 function accessBadge(hostname, accessProtection) {
   const protection = accessProtection[hostname];
@@ -390,7 +415,6 @@ async function deleteRoute(hostname, btn) {
   const row = btn.closest('tr');
   row.classList.add('row-deleting');
   btn.disabled = true;
-  btn.textContent = 'Borrando...';
 
   try {
     const res = await fetch('/api/routes/delete', {
@@ -407,7 +431,6 @@ async function deleteRoute(hostname, btn) {
     showToast(\`No se pudo borrar \${hostname}: \${e.message}\`, 'error');
     row.classList.remove('row-deleting');
     btn.disabled = false;
-    btn.textContent = 'Borrar';
   }
 }
 window.deleteRoute = deleteRoute;
@@ -416,7 +439,7 @@ window.deleteRoute = deleteRoute;
 // live=1 (page load, manual refresh). The automatic poll omits them to
 // avoid spending Cloudflare's account-wide rate limit in the background --
 // keep showing the last known values in between instead of blanking them.
-let lastLive = { unmanagedRoutes: [], accessProtection: {}, reusablePolicies: [] };
+let lastLive = { unmanagedRoutes: [], accessProtection: {}, reusablePolicies: [], dnsRecords: [] };
 
 async function refreshState(live, fresh) {
   const params = [];
@@ -429,21 +452,13 @@ async function refreshState(live, fresh) {
       unmanagedRoutes: data.unmanagedRoutes || [],
       accessProtection: data.accessProtection || {},
       reusablePolicies: data.reusablePolicies || [],
+      dnsRecords: data.dnsRecords || [],
     };
   }
   data.unmanagedRoutes = lastLive.unmanagedRoutes;
   data.accessProtection = lastLive.accessProtection;
   data.reusablePolicies = lastLive.reusablePolicies;
-
-  const s = data.status;
-  document.getElementById('status-bar').innerHTML = \`
-    <div class="status-item"><span class="label">Cuenta</span><span class="value">\${esc(s.accountName)}</span></div>
-    <div class="status-item"><span class="label">Zona</span><span class="value">\${esc(s.zoneName)}</span></div>
-    <div class="status-item"><span class="label">Tunnel</span><span class="value">\${esc(s.tunnelName)}</span></div>
-    <div class="status-item"><span class="label">Auth</span><span class="value"><span class="badge \${s.authMode === 'token' ? 'ok' : 'warn'}">\${s.authMode === 'token' ? 'API Token' : 'Global Key'}</span></span></div>
-    <div class="status-item"><span class="label">En marcha desde</span><span class="value">hace \${timeAgo(data.startedAt)}</span></div>
-    <div class="status-item"><span class="label">Última pasada</span><span class="value">hace \${timeAgo(data.timestamp)}</span></div>
-  \`;
+  data.dnsRecords = lastLive.dnsRecords;
 
   const tunnelEntries = Object.entries(data.tunnels || {});
   const tunnelsHtml = tunnelEntries.length === 0
@@ -462,7 +477,7 @@ async function refreshState(live, fresh) {
             <td><code>\${esc(t.service)}</code></td>
             <td>\${accessBadge(hostname, data.accessProtection || {})}</td>
             <td>\${stateBadge}</td>
-            <td><button class="btn-delete" onclick="deleteRoute('\${esc(hostname)}', this)">Borrar</button></td>
+            <td><button class="btn-delete" title="Borrar ruta" onclick="deleteRoute('\${esc(hostname)}', this)">\${TRASH_ICON}</button></td>
           </tr>\`;
         }).join('')}
       </tbody></table>\`;
@@ -476,7 +491,7 @@ async function refreshState(live, fresh) {
             <td>\${hostnameLink(r.hostname)}</td>
             <td><code>\${esc(r.service)}</code></td>
             <td>\${accessBadge(r.hostname, data.accessProtection || {})}</td>
-            <td><button class="btn-delete" onclick="deleteRoute('\${esc(r.hostname)}', this)">Borrar</button></td>
+            <td><button class="btn-delete" title="Borrar ruta" onclick="deleteRoute('\${esc(r.hostname)}', this)">\${TRASH_ICON}</button></td>
           </tr>\`).join('')}
       </tbody></table>\`;
   document.getElementById('unmanaged-table').innerHTML = unmanagedHtml;
@@ -494,6 +509,20 @@ async function refreshState(live, fresh) {
           </tr>\`).join('')}
       </tbody></table>\`;
   document.getElementById('policies-table').innerHTML = policiesHtml;
+
+  const records = (data.dnsRecords || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+  const dnsHtml = records.length === 0
+    ? '<div class="empty">No se han podido leer los registros DNS</div>'
+    : \`<table><thead><tr><th>Tipo</th><th>Nombre</th><th>Contenido</th><th>Proxied</th><th>TTL</th></tr></thead><tbody>
+        \${records.map(r => \`<tr>
+            <td><span class="badge muted">\${esc(r.type)}</span></td>
+            <td><code>\${esc(r.name)}</code></td>
+            <td><code>\${esc(r.content)}</code></td>
+            <td>\${r.proxied ? '<span class="badge ok">sí</span>' : '<span class="badge muted">no</span>'}</td>
+            <td>\${r.ttl === 1 ? 'auto' : r.ttl}</td>
+          </tr>\`).join('')}
+      </tbody></table>\`;
+  document.getElementById('dns-table').innerHTML = dnsHtml;
 }
 
 function switchTab(name) {
